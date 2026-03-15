@@ -1243,15 +1243,23 @@ async function runLinkJob(bot, message, targetPhone, existingJob = null) {
   activeJobs.set(job.id, true);
 
   try {
-    const deviceId = job.deviceId ?? crypto.randomUUID();
-    const profileId = job.profileId ?? crypto.randomUUID();
+    // প্রতিটি attempt-এ সবসময় নতুন deviceId এবং নতুন account তৈরি করতে হবে।
+    // পুরনো accountPhone reuse করলে "do not send verification codes frequently"
+    // rate limit error আসে — কারণ server একই account-এ বারবার পাঠানো allow করে না।
+    //
+    // শুধুমাত্র deviceCode আগে পাওয়া থাকলে (waiting_bind resume) account creation skip।
+    const savedDeviceCode = job.deviceCode ?? "";
+
+    // Always fresh device ID + session for every run
+    const deviceId = crypto.randomUUID();
     const session = new EarnHeapSession(state.settings, deviceId);
-    job.deviceId = job.deviceId ?? deviceId;
-    job.profileId = job.profileId ?? profileId;
+    job.deviceId = deviceId;
+    job.profileId = crypto.randomUUID();
     await upsertJob(job);
 
-    let accountPhone = job.accountPhone ?? "";
-    if (!accountPhone) {
+    let accountPhone = "";
+    if (!savedDeviceCode) {
+      // Fresh account প্রতিটি attempt-এ
       await bot.sendMessage(
         message.chat.id,
         `⏳ ${targetPhone} এর জন্য নতুন account session তৈরি হচ্ছে...\nJob: ${job.id}`,
@@ -1260,6 +1268,9 @@ async function runLinkJob(bot, message, targetPhone, existingJob = null) {
       job.accountPhone = accountPhone;
       job.status = "account_created";
       await upsertJob(job);
+    } else {
+      // deviceCode আগে পাওয়া আছে, শুধু login করে binding poll করতে হবে
+      accountPhone = job.accountPhone ?? "";
     }
 
     await session.loginOrRegister(
