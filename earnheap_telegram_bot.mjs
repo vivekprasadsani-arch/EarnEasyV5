@@ -673,47 +673,23 @@ class TelegramBot {
   }
 }
 
-// প্রতিটি session-এর জন্য random browser fingerprint তৈরি করে
-function buildRandomFingerprint() {
-  const chromeVersions = ["120.0.0.0", "121.0.0.0", "122.0.0.0", "123.0.0.0", "124.0.0.0"];
-  const androidVersions = ["10", "11", "12", "13", "14"];
-  const devices = [
-    "Pixel 6", "Pixel 7", "Pixel 8",
-    "SM-G991B", "SM-S911B", "SM-A546B",
-    "Redmi Note 12", "Redmi Note 13",
-    "RMX3550", "CPH2387",
-  ];
-  const chromeVer = chromeVersions[crypto.randomInt(0, chromeVersions.length)];
-  const androidVer = androidVersions[crypto.randomInt(0, androidVersions.length)];
-  const device = devices[crypto.randomInt(0, devices.length)];
-  const userAgent = `Mozilla/5.0 (Linux; Android ${androidVer}; ${device}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVer} Mobile Safari/537.36`;
-  const acceptLanguages = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-IN,en;q=0.8"];
-  const acceptLang = acceptLanguages[crypto.randomInt(0, acceptLanguages.length)];
-  return { userAgent, acceptLang };
-}
-
 class EarnHeapSession {
   constructor(settings, deviceId = crypto.randomUUID()) {
     this.deviceId = deviceId;
     this.proxyUrl = settings.earnHeapProxyUrl ?? null;
-    // প্রতিটি session-এর জন্য আলাদা browser fingerprint
-    this.fingerprint = buildRandomFingerprint();
-    // Static axios instance (proxy ছাড়া বা single-IP proxy-তে ব্যবহার)
     this.http = buildEarnHeapAxios(this.proxyUrl);
     this.token = null;
   }
 
   buildHeaders(token = null) {
     const headers = {
-      accept: "application/json, text/plain, */*",
-      "accept-language": this.fingerprint.acceptLang,
+      accept: "*/*",
       "content-type": "application/json",
       "device-id": this.deviceId,
       language: "en",
       origin: WEB_ORIGIN,
       platform: "web",
       referer: `${WEB_ORIGIN}/`,
-      "user-agent": this.fingerprint.userAgent,
       usercompre: USERCOMPRE,
       "x-requested-with": "XMLHttpRequest",
     };
