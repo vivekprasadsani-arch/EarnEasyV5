@@ -1250,77 +1250,117 @@ async function runLinkJob(bot, message, targetPhone, existingJob = null) {
     job.profileId = job.profileId ?? profileId;
     await upsertJob(job);
 
+    // --- Account creation + pairing code (retry loop) ---
+    // সার্ভার নতুন account-এ pairing request reject করলে
+    // নতুন account তৈরি করে সর্বোচ্চ MAX_PAIRING_RETRIES বার চেষ্টা করা হবে।
+    const MAX_PAIRING_RETRIES = 3;
+    const POST_LOGIN_DELAY_MS = 3000; // account activate হওয়ার সময় দেওয়া
+
     let accountPhone = job.accountPhone ?? "";
-    if (!accountPhone) {
-      await bot.sendMessage(
-        message.chat.id,
-        `⏳ Creating a new account session for ${targetPhone}...\nJob: ${job.id}`,
-      );
-      accountPhone = await generateUniqueEarnHeapPhone(session);
-      job.accountPhone = accountPhone;
-      job.status = "account_created";
-      await upsertJob(job);
-    }
-
-    await session.loginOrRegister(
-      accountPhone,
-      job.password,
-      job.invitationCode,
-    );
-
     let acceptedPhone = job.acceptedPhone ?? "";
     let deviceCode = job.deviceCode ?? "";
 
     if (!deviceCode) {
-      const pairResult = await session.requestPairingCodeWithFallback(targetPhone);
-      const codeResponse = pairResult.response;
+      let pairSuccess = false;
+      let lastFailMsg = "unknown error";
 
-      if (pairResult.acceptedPhone && pairResult.acceptedPhone !== targetPhone) {
-        acceptedPhone = pairResult.acceptedPhone;
-        await bot.sendMessage(
-          message.chat.id,
-          `📞 ${targetPhone} accepted as ${pairResult.acceptedPhone}\nJob: ${job.id}`,
-        );
-      }
-
-      if (codeResponse.code !== 200) {
-        const msg = String(codeResponse.msg ?? "");
-        if (msg.toLowerCase().includes("phone number format")) {
-          await deleteJob(job.id);
-          await sendMainMenu(
-            bot,
-            message.chat.id,
-            userId,
-            `⚠️ ${targetPhone} was not accepted. Try strict E.164 format.\nJob: ${job.id}`,
-          );
-          return;
+      for (let attempt = 1; attempt <= MAX_PAIRING_RETRIES; attempt += 1) {
+        // নতুন account দরকার হলে (first attempt বা retry)
+        if (!accountPhone || attempt > 1) {
+          if (attempt > 1) {
+            await bot.sendMessage(
+              message.chat.id,
+              `🔄 Retry ${attempt}/${MAX_PAIRING_RETRIES} — creating a fresh account for ${targetPhone}...\nJob: ${job.id}`,
+            );
+            // পুরনো session-এর বদলে নতুন session (fresh fingerprint + fresh proxy IP)
+            const newDeviceId = crypto.randomUUID();
+            job.deviceId = newDeviceId;
+            const newSession = new EarnHeapSession(state.settings, newDeviceId);
+            // session reference update করা হচ্ছে
+            Object.assign(session, newSession);
+          } else {
+            await bot.sendMessage(
+              message.chat.id,
+              `⏳ Creating a new account session for ${targetPhone}...\nJob: ${job.id}`,
+            );
+          }
+          accountPhone = await generateUniqueEarnHeapPhone(session);
+          job.accountPhone = accountPhone;
+          job.status = "account_created";
+          await upsertJob(job);
         }
+
+        await session.loginOrRegister(
+          accountPhone,
+          job.password,
+          job.invitationCode,
+        );
+
+        // Account activate হওয়ার জন্য অল্প সময় অপেক্ষা
+        await sleep(POST_LOGIN_DELAY_MS);
+
+        const pairResult = await session.requestPairingCodeWithFallback(targetPhone);
+        const codeResponse = pairResult.response;
+
+        if (pairResult.acceptedPhone && pairResult.acceptedPhone !== targetPhone) {
+          acceptedPhone = pairResult.acceptedPhone;
+          await bot.sendMessage(
+            message.chat.id,
+            `📞 ${targetPhone} accepted as ${pairResult.acceptedPhone}\nJob: ${job.id}`,
+          );
+        }
+
+        if (codeResponse.code !== 200) {
+          const msg = String(codeResponse.msg ?? "");
+
+          // Phone format ভুল হলে retry-তে লাভ নেই
+          if (msg.toLowerCase().includes("phone number format")) {
+            await deleteJob(job.id);
+            await sendMainMenu(
+              bot,
+              message.chat.id,
+              userId,
+              `⚠️ ${targetPhone} was not accepted. Try strict E.164 format.\nJob: ${job.id}`,
+            );
+            return;
+          }
+
+          lastFailMsg = msg || "unknown error";
+          console.warn(`[job:${job.id}] Attempt ${attempt}: pairing failed — ${lastFailMsg}`);
+          // account reset করে পরের iteration-এ নতুন account
+          accountPhone = "";
+          job.accountPhone = "";
+          continue;
+        }
+
+        deviceCode = codeResponse?.data?.deviceCode ?? "";
+        if (!deviceCode) {
+          lastFailMsg = "no pairing code returned";
+          console.warn(`[job:${job.id}] Attempt ${attempt}: ${lastFailMsg}`);
+          accountPhone = "";
+          job.accountPhone = "";
+          continue;
+        }
+
+        // সফল!
+        pairSuccess = true;
+        job.deviceCode = deviceCode;
+        job.acceptedPhone = acceptedPhone;
+        job.status = "waiting_bind";
+        await upsertJob(job);
+        break;
+      }
+
+      if (!pairSuccess) {
         await deleteJob(job.id);
         await sendMainMenu(
           bot,
           message.chat.id,
           userId,
-          `⚠️ ${targetPhone} pairing request failed: ${msg || "unknown error"}\nJob: ${job.id}`,
+          `⚠️ ${targetPhone} pairing failed after ${MAX_PAIRING_RETRIES} attempts.\nLast error: ${lastFailMsg}\nJob: ${job.id}`,
         );
         return;
       }
-
-      deviceCode = codeResponse?.data?.deviceCode ?? "";
-      if (!deviceCode) {
-        await deleteJob(job.id);
-        await sendMainMenu(
-          bot,
-          message.chat.id,
-          userId,
-          `⚠️ No pairing code was returned for ${targetPhone}.\nJob: ${job.id}`,
-        );
-        return;
-      }
-
-      job.deviceCode = deviceCode;
-      job.acceptedPhone = acceptedPhone;
-      job.status = "waiting_bind";
-      await upsertJob(job);
     }
 
     await bot.sendMessage(message.chat.id, `${targetPhone}\n${deviceCode}`, {
