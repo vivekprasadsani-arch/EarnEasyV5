@@ -585,7 +585,7 @@ function queueActorTask(actorId, task) {
 
 function buildEarnHeapAxios(proxyUrl) {
   const config = {
-    timeout: 30_000,
+    timeout: 50_000,
     validateStatus: () => true,
   };
   if (!proxyUrl) {
