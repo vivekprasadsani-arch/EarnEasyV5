@@ -1301,25 +1301,30 @@ async function runLinkJob(bot, message, targetPhone, existingJob = null) {
 
     const deadline = Date.now() + LINK_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const list = await session.queryBindingList();
-      const match = isBound(list, targetPhone);
-      if (match) {
-        const normalizedLinked = normalizePhone(match.account);
-        const successText =
-          `✅ Success\n` +
-          `📱 Target: ${targetPhone}\n` +
-          `🆔 Account: ${accountPhone}\n` +
-          `🔗 Linked number: ${normalizedLinked}\n` +
-          `🧵 Job: ${job.id}`;
-        await sendMainMenu(bot, message.chat.id, userId, successText);
-        await notifyAdminLinkSuccess(
-          bot,
-          message.from,
-          accountPhone,
-          normalizedLinked,
-        );
-        await deleteJob(job.id);
-        return;
+      try {
+        const list = await session.queryBindingList();
+        const match = isBound(list, targetPhone);
+        if (match) {
+          const normalizedLinked = normalizePhone(match.account);
+          const successText =
+            `✅ Success\n` +
+            `📱 Target: ${targetPhone}\n` +
+            `🆔 Account: ${accountPhone}\n` +
+            `🔗 Linked number: ${normalizedLinked}\n` +
+            `🧵 Job: ${job.id}`;
+          await sendMainMenu(bot, message.chat.id, userId, successText);
+          await notifyAdminLinkSuccess(
+            bot,
+            message.from,
+            accountPhone,
+            normalizedLinked,
+          );
+          await deleteJob(job.id);
+          return;
+        }
+      } catch (pollError) {
+        // Ignoring intermittent proxy/network errors during polling to prevent job crashes
+        // console.error(`Job ${job.id} polling error: ${pollError.message}`);
       }
       await sleep(LINK_POLL_INTERVAL_MS);
     }
