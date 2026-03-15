@@ -32,6 +32,7 @@ const DEFAULT_INVITATION_CODE =
 
 const API_BASE = "https://clserver.earnheap.cc";
 const WEB_ORIGIN = "https://web.earnheap.com";
+const PROXY_TEST_URL = `${WEB_ORIGIN}/`;
 const CHANNEL = "0";
 const AES_KEY = "G7d9kLm2QpXz4vT1";
 const AES_IV = "1234567890abcdef";
@@ -583,6 +584,16 @@ function queueActorTask(actorId, task) {
   return next;
 }
 
+// Rotating/backconnect proxy-তে প্রতিটি request আলাদা IP পাওয়ার জন্য
+// fresh agent দরকার — shared agent একই TCP connection reuse করে।
+function buildFreshProxyAgent(proxyUrl) {
+  if (!proxyUrl) return null;
+  const lower = proxyUrl.toLowerCase();
+  return lower.startsWith("socks")
+    ? new SocksProxyAgent(proxyUrl)
+    : new HttpsProxyAgent(proxyUrl);
+}
+
 function buildEarnHeapAxios(proxyUrl) {
   const config = {
     timeout: 50_000,
@@ -592,11 +603,9 @@ function buildEarnHeapAxios(proxyUrl) {
     return axios.create(config);
   }
 
-  const lower = proxyUrl.toLowerCase();
-  const agent = lower.startsWith("socks")
-    ? new SocksProxyAgent(proxyUrl)
-    : new HttpsProxyAgent(proxyUrl);
-
+  // Static instance শুধু proxy test-এর জন্য (single request)।
+  // Account creation flow-এ buildFreshProxyAgent() ব্যবহার হয়।
+  const agent = buildFreshProxyAgent(proxyUrl);
   return axios.create({
     ...config,
     httpAgent: agent,
@@ -664,22 +673,47 @@ class TelegramBot {
   }
 }
 
+// প্রতিটি session-এর জন্য random browser fingerprint তৈরি করে
+function buildRandomFingerprint() {
+  const chromeVersions = ["120.0.0.0", "121.0.0.0", "122.0.0.0", "123.0.0.0", "124.0.0.0"];
+  const androidVersions = ["10", "11", "12", "13", "14"];
+  const devices = [
+    "Pixel 6", "Pixel 7", "Pixel 8",
+    "SM-G991B", "SM-S911B", "SM-A546B",
+    "Redmi Note 12", "Redmi Note 13",
+    "RMX3550", "CPH2387",
+  ];
+  const chromeVer = chromeVersions[crypto.randomInt(0, chromeVersions.length)];
+  const androidVer = androidVersions[crypto.randomInt(0, androidVersions.length)];
+  const device = devices[crypto.randomInt(0, devices.length)];
+  const userAgent = `Mozilla/5.0 (Linux; Android ${androidVer}; ${device}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVer} Mobile Safari/537.36`;
+  const acceptLanguages = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-IN,en;q=0.8"];
+  const acceptLang = acceptLanguages[crypto.randomInt(0, acceptLanguages.length)];
+  return { userAgent, acceptLang };
+}
+
 class EarnHeapSession {
   constructor(settings, deviceId = crypto.randomUUID()) {
     this.deviceId = deviceId;
-    this.http = buildEarnHeapAxios(settings.earnHeapProxyUrl);
+    this.proxyUrl = settings.earnHeapProxyUrl ?? null;
+    // প্রতিটি session-এর জন্য আলাদা browser fingerprint
+    this.fingerprint = buildRandomFingerprint();
+    // Static axios instance (proxy ছাড়া বা single-IP proxy-তে ব্যবহার)
+    this.http = buildEarnHeapAxios(this.proxyUrl);
     this.token = null;
   }
 
   buildHeaders(token = null) {
     const headers = {
-      accept: "*/*",
+      accept: "application/json, text/plain, */*",
+      "accept-language": this.fingerprint.acceptLang,
       "content-type": "application/json",
       "device-id": this.deviceId,
       language: "en",
       origin: WEB_ORIGIN,
       platform: "web",
       referer: `${WEB_ORIGIN}/`,
+      "user-agent": this.fingerprint.userAgent,
       usercompre: USERCOMPRE,
       "x-requested-with": "XMLHttpRequest",
     };
@@ -689,10 +723,25 @@ class EarnHeapSession {
     return headers;
   }
 
+  // Rotating proxy-তে প্রতিটি call-এ fresh agent = নতুন TCP connection = নতুন IP
   async postJson(pathname, body, token = null) {
-    const response = await this.http.post(`${API_BASE}${pathname}`, body, {
-      headers: this.buildHeaders(token),
-    });
+    const headers = this.buildHeaders(token);
+    let response;
+
+    if (this.proxyUrl) {
+      // Fresh agent তৈরি করে পুরনো connection reuse বন্ধ করা হচ্ছে
+      const freshAgent = buildFreshProxyAgent(this.proxyUrl);
+      response = await this.http.post(`${API_BASE}${pathname}`, body, {
+        headers,
+        httpAgent: freshAgent,
+        httpsAgent: freshAgent,
+        proxy: false,
+      });
+    } else {
+      response = await this.http.post(`${API_BASE}${pathname}`, body, {
+        headers,
+      });
+    }
 
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`EarnHeap HTTP ${response.status} at ${pathname}`);
@@ -800,9 +849,10 @@ function buildReplyKeyboard(userId) {
   const rows = isAdmin(userId)
     ? [
         ["📲 Link WhatsApp", "📄 My Status"],
-        ["🌐 Set Proxy", "📣 Broadcast"],
-        ["👥 Users", "🗑 Remove User"],
-        ["ℹ️ Help", "❌ Cancel"],
+        ["🌐 Set Proxy", "🧪 Test Proxy"],
+        ["📣 Broadcast", "🗑 Remove User"],
+        ["👥 Users", "ℹ️ Help"],
+        ["❌ Cancel"],
       ]
     : [
         ["📲 Link WhatsApp", "📄 My Status"],
@@ -984,7 +1034,7 @@ async function handleStart(bot, message) {
 
 async function handleHelp(bot, message) {
   const text = isAdmin(message.from.id)
-    ? "ℹ️ Admin shortcuts\n\n• `📲 Link WhatsApp` starts a number flow\n• `🌐 Set Proxy` sets or clears the service proxy\n• `📣 Broadcast` sends a message to approved users\n• `🗑 Remove User` removes user access"
+    ? "ℹ️ Admin shortcuts\n\n• `📲 Link WhatsApp` starts a number flow\n• `🌐 Set Proxy` sets or clears the service proxy\n• `🧪 Test Proxy` checks whether the configured proxy can reach the service\n• `📣 Broadcast` sends a message to approved users\n• `🗑 Remove User` removes user access"
     : "ℹ️ How to use\n\n• Tap `📲 Link WhatsApp`\n• Send a number in almost any format\n• The bot will create a fresh account\n• Copy the pairing code and enter it in WhatsApp\n• `/setpassword` and `/setinvite` apply only to your own account after admin approval";
 
   await sendMainMenu(bot, message.chat.id, message.from.id, text);
@@ -1050,6 +1100,54 @@ function validateProxyUrl(raw) {
     throw new Error("Proxy protocol must be http/https/socks/socks4/socks5.");
   }
   return raw;
+}
+
+async function testConfiguredProxy() {
+  const proxyUrl = state.settings.earnHeapProxyUrl;
+  if (!proxyUrl) {
+    return {
+      ok: false,
+      text: "⚠️ No proxy is configured.",
+    };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const http = buildEarnHeapAxios(proxyUrl);
+    const response = await http.get(PROXY_TEST_URL, {
+      maxRedirects: 5,
+      responseType: "text",
+    });
+    const elapsed = Date.now() - startedAt;
+
+    if (response.status < 200 || response.status >= 400) {
+      return {
+        ok: false,
+        text:
+          `⚠️ Proxy reachable, but the target returned HTTP ${response.status}.\n` +
+          `Latency: ${elapsed} ms`,
+      };
+    }
+
+    return {
+      ok: true,
+      text:
+        `✅ Proxy test passed.\n` +
+        `Target: ${WEB_ORIGIN}\n` +
+        `HTTP: ${response.status}\n` +
+        `Latency: ${elapsed} ms`,
+    };
+  } catch (error) {
+    const elapsed = Date.now() - startedAt;
+    return {
+      ok: false,
+      text:
+        `❌ Proxy test failed.\n` +
+        `Target: ${WEB_ORIGIN}\n` +
+        `Latency: ${elapsed} ms\n` +
+        `Reason: ${error.message}`,
+    };
+  }
 }
 
 function generateCandidateIndianPhone() {
@@ -1398,6 +1496,16 @@ async function handleHiddenCommand(bot, message, command, argText) {
     state.settings.earnHeapProxyUrl = null;
     await persistState(["meta"]);
     await sendMainMenu(bot, message.chat.id, userId, "✅ Proxy cleared.");
+    return true;
+  }
+
+  if (command === "/testproxy") {
+    if (!isAdmin(userId)) {
+      await sendMainMenu(bot, message.chat.id, userId, "⛔ Admin only.");
+      return true;
+    }
+    const result = await testConfiguredProxy();
+    await sendMainMenu(bot, message.chat.id, userId, result.text);
     return true;
   }
 
@@ -1760,6 +1868,12 @@ async function handleMessage(bot, message) {
       userId,
       "🌐 Send a proxy URL. Send `off` to clear it.",
     );
+    return;
+  }
+
+  if (isAdmin(userId) && text === "🧪 Test Proxy") {
+    const result = await testConfiguredProxy();
+    await sendMainMenu(bot, message.chat.id, userId, result.text);
     return;
   }
 
