@@ -699,25 +699,10 @@ class EarnHeapSession {
     return headers;
   }
 
-  // Rotating proxy-তে প্রতিটি call-এ fresh agent = নতুন TCP connection = নতুন IP
   async postJson(pathname, body, token = null) {
-    const headers = this.buildHeaders(token);
-    let response;
-
-    if (this.proxyUrl) {
-      // Fresh agent তৈরি করে পুরনো connection reuse বন্ধ করা হচ্ছে
-      const freshAgent = buildFreshProxyAgent(this.proxyUrl);
-      response = await this.http.post(`${API_BASE}${pathname}`, body, {
-        headers,
-        httpAgent: freshAgent,
-        httpsAgent: freshAgent,
-        proxy: false,
-      });
-    } else {
-      response = await this.http.post(`${API_BASE}${pathname}`, body, {
-        headers,
-      });
-    }
+    const response = await this.http.post(`${API_BASE}${pathname}`, body, {
+      headers: this.buildHeaders(token),
+    });
 
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`EarnHeap HTTP ${response.status} at ${pathname}`);
