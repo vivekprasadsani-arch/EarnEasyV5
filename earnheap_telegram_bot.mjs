@@ -32,7 +32,6 @@ const DEFAULT_INVITATION_CODE =
 
 const API_BASE = "https://clserver.earnheap.cc";
 const WEB_ORIGIN = "https://web.earnheap.com";
-const PROXY_TEST_URL = `${WEB_ORIGIN}/`;
 const CHANNEL = "0";
 const AES_KEY = "G7d9kLm2QpXz4vT1";
 const AES_IV = "1234567890abcdef";
@@ -584,28 +583,20 @@ function queueActorTask(actorId, task) {
   return next;
 }
 
-// Rotating/backconnect proxy-তে প্রতিটি request আলাদা IP পাওয়ার জন্য
-// fresh agent দরকার — shared agent একই TCP connection reuse করে।
-function buildFreshProxyAgent(proxyUrl) {
-  if (!proxyUrl) return null;
-  const lower = proxyUrl.toLowerCase();
-  return lower.startsWith("socks")
-    ? new SocksProxyAgent(proxyUrl)
-    : new HttpsProxyAgent(proxyUrl);
-}
-
 function buildEarnHeapAxios(proxyUrl) {
   const config = {
-    timeout: 50_000,
+    timeout: 30_000,
     validateStatus: () => true,
   };
   if (!proxyUrl) {
     return axios.create(config);
   }
 
-  // Static instance শুধু proxy test-এর জন্য (single request)।
-  // Account creation flow-এ buildFreshProxyAgent() ব্যবহার হয়।
-  const agent = buildFreshProxyAgent(proxyUrl);
+  const lower = proxyUrl.toLowerCase();
+  const agent = lower.startsWith("socks")
+    ? new SocksProxyAgent(proxyUrl)
+    : new HttpsProxyAgent(proxyUrl);
+
   return axios.create({
     ...config,
     httpAgent: agent,
@@ -676,8 +667,7 @@ class TelegramBot {
 class EarnHeapSession {
   constructor(settings, deviceId = crypto.randomUUID()) {
     this.deviceId = deviceId;
-    this.proxyUrl = settings.earnHeapProxyUrl ?? null;
-    this.http = buildEarnHeapAxios(this.proxyUrl);
+    this.http = buildEarnHeapAxios(settings.earnHeapProxyUrl);
     this.token = null;
   }
 
@@ -700,19 +690,36 @@ class EarnHeapSession {
   }
 
   async postJson(pathname, body, token = null) {
-    const response = await this.http.post(`${API_BASE}${pathname}`, body, {
-      headers: this.buildHeaders(token),
-    });
+    let lastError;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const response = await this.http.post(`${API_BASE}${pathname}`, body, {
+          headers: this.buildHeaders(token),
+        });
 
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(`EarnHeap HTTP ${response.status} at ${pathname}`);
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`EarnHeap HTTP ${response.status} at ${pathname}`);
+        }
+
+        const payload =
+          typeof response.data === "string"
+            ? JSON.parse(response.data)
+            : response.data;
+        return payload;
+      } catch (error) {
+        lastError = error;
+        if (
+          error.message.includes("EarnHeap HTTP") &&
+          !error.message.includes("EarnHeap HTTP 5")
+        ) {
+          throw error;
+        }
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+      }
     }
-
-    const payload =
-      typeof response.data === "string"
-        ? JSON.parse(response.data)
-        : response.data;
-    return payload;
+    throw lastError;
   }
 
   async checkUser(phone) {
@@ -810,10 +817,9 @@ function buildReplyKeyboard(userId) {
   const rows = isAdmin(userId)
     ? [
         ["📲 Link WhatsApp", "📄 My Status"],
-        ["🌐 Set Proxy", "🧪 Test Proxy"],
-        ["📣 Broadcast", "🗑 Remove User"],
-        ["👥 Users", "ℹ️ Help"],
-        ["❌ Cancel"],
+        ["🌐 Set Proxy", "📣 Broadcast"],
+        ["👥 Users", "🗑 Remove User"],
+        ["ℹ️ Help", "❌ Cancel"],
       ]
     : [
         ["📲 Link WhatsApp", "📄 My Status"],
@@ -995,7 +1001,7 @@ async function handleStart(bot, message) {
 
 async function handleHelp(bot, message) {
   const text = isAdmin(message.from.id)
-    ? "ℹ️ Admin shortcuts\n\n• `📲 Link WhatsApp` starts a number flow\n• `🌐 Set Proxy` sets or clears the service proxy\n• `🧪 Test Proxy` checks whether the configured proxy can reach the service\n• `📣 Broadcast` sends a message to approved users\n• `🗑 Remove User` removes user access"
+    ? "ℹ️ Admin shortcuts\n\n• `📲 Link WhatsApp` starts a number flow\n• `🌐 Set Proxy` sets or clears the service proxy\n• `📣 Broadcast` sends a message to approved users\n• `🗑 Remove User` removes user access"
     : "ℹ️ How to use\n\n• Tap `📲 Link WhatsApp`\n• Send a number in almost any format\n• The bot will create a fresh account\n• Copy the pairing code and enter it in WhatsApp\n• `/setpassword` and `/setinvite` apply only to your own account after admin approval";
 
   await sendMainMenu(bot, message.chat.id, message.from.id, text);
@@ -1061,54 +1067,6 @@ function validateProxyUrl(raw) {
     throw new Error("Proxy protocol must be http/https/socks/socks4/socks5.");
   }
   return raw;
-}
-
-async function testConfiguredProxy() {
-  const proxyUrl = state.settings.earnHeapProxyUrl;
-  if (!proxyUrl) {
-    return {
-      ok: false,
-      text: "⚠️ No proxy is configured.",
-    };
-  }
-
-  const startedAt = Date.now();
-  try {
-    const http = buildEarnHeapAxios(proxyUrl);
-    const response = await http.get(PROXY_TEST_URL, {
-      maxRedirects: 5,
-      responseType: "text",
-    });
-    const elapsed = Date.now() - startedAt;
-
-    if (response.status < 200 || response.status >= 400) {
-      return {
-        ok: false,
-        text:
-          `⚠️ Proxy reachable, but the target returned HTTP ${response.status}.\n` +
-          `Latency: ${elapsed} ms`,
-      };
-    }
-
-    return {
-      ok: true,
-      text:
-        `✅ Proxy test passed.\n` +
-        `Target: ${WEB_ORIGIN}\n` +
-        `HTTP: ${response.status}\n` +
-        `Latency: ${elapsed} ms`,
-    };
-  } catch (error) {
-    const elapsed = Date.now() - startedAt;
-    return {
-      ok: false,
-      text:
-        `❌ Proxy test failed.\n` +
-        `Target: ${WEB_ORIGIN}\n` +
-        `Latency: ${elapsed} ms\n` +
-        `Reason: ${error.message}`,
-    };
-  }
 }
 
 function generateCandidateIndianPhone() {
@@ -1204,95 +1162,90 @@ async function runLinkJob(bot, message, targetPhone, existingJob = null) {
   activeJobs.set(job.id, true);
 
   try {
-    // প্রতিটি attempt-এ সবসময় নতুন deviceId এবং নতুন account তৈরি করতে হবে।
-    // পুরনো accountPhone reuse করলে "do not send verification codes frequently"
-    // rate limit error আসে — কারণ server একই account-এ বারবার পাঠানো allow করে না।
-    //
-    // শুধুমাত্র deviceCode আগে পাওয়া থাকলে (waiting_bind resume) account creation skip।
     const savedDeviceCode = job.deviceCode ?? "";
-
-    // Always fresh device ID + session for every run
-    const deviceId = crypto.randomUUID();
-    const session = new EarnHeapSession(state.settings, deviceId);
-    job.deviceId = deviceId;
-    job.profileId = crypto.randomUUID();
-    await upsertJob(job);
-
     let accountPhone = "";
-    if (!savedDeviceCode) {
-      // Fresh account প্রতিটি attempt-এ
-      await bot.sendMessage(
-        message.chat.id,
-        `⏳ ${targetPhone} এর জন্য নতুন account session তৈরি হচ্ছে...\nJob: ${job.id}`,
-      );
-      accountPhone = await generateUniqueEarnHeapPhone(session);
-      job.accountPhone = accountPhone;
-      job.status = "account_created";
-      await upsertJob(job);
-    } else {
-      // deviceCode আগে পাওয়া আছে, শুধু login করে binding poll করতে হবে
-      accountPhone = job.accountPhone ?? "";
-    }
+    let acceptedPhone = "";
+    let deviceCode = savedDeviceCode;
+    let session;
+    let finalErrorMsg = "";
 
-    await session.loginOrRegister(
-      accountPhone,
-      job.password,
-      job.invitationCode,
-    );
+    // EarnHeap API is flaky and often throws "phone number format" or network errors
+    // We retry up to 5 times silently before giving up to ensure reliability.
+    for (let tryCount = 1; tryCount <= 5; tryCount++) {
+      try {
+        session = new EarnHeapSession(state.settings, crypto.randomUUID());
+        job.deviceId = session.deviceId;
+        job.profileId = crypto.randomUUID();
+        await upsertJob(job);
 
-    let acceptedPhone = job.acceptedPhone ?? "";
-    let deviceCode = job.deviceCode ?? "";
+        // If we are resuming, skip account creation
+        if (!savedDeviceCode && !deviceCode) {
+          if (tryCount === 1) {
+            await bot.sendMessage(
+              message.chat.id,
+              `⏳ ${targetPhone} এর জন্য নতুন account session তৈরি হচ্ছে...\nJob: ${job.id}`,
+            );
+          }
+          accountPhone = await generateUniqueEarnHeapPhone(session);
+          job.accountPhone = accountPhone;
+          job.status = "account_created";
+          await upsertJob(job);
+        } else {
+          accountPhone = job.accountPhone ?? "";
+        }
 
-    if (!deviceCode) {
-      const pairResult = await session.requestPairingCodeWithFallback(targetPhone);
-      const codeResponse = pairResult.response;
+        await session.loginOrRegister(accountPhone, job.password, job.invitationCode);
 
-      if (pairResult.acceptedPhone && pairResult.acceptedPhone !== targetPhone) {
-        acceptedPhone = pairResult.acceptedPhone;
-        await bot.sendMessage(
-          message.chat.id,
-          `📞 ${targetPhone} accepted as ${pairResult.acceptedPhone}\nJob: ${job.id}`,
-        );
-      }
+        if (!deviceCode) {
+          const pairResult = await session.requestPairingCodeWithFallback(targetPhone);
+          const codeResponse = pairResult.response;
 
-      if (codeResponse.code !== 200) {
-        const msg = String(codeResponse.msg ?? "");
-        if (msg.toLowerCase().includes("phone number format")) {
+          if (codeResponse.code !== 200) {
+            finalErrorMsg = String(codeResponse.msg ?? "");
+            throw new Error(`API Rejected: ${finalErrorMsg}`); // triggers retry catch block
+          }
+
+          if (pairResult.acceptedPhone && pairResult.acceptedPhone !== targetPhone) {
+            acceptedPhone = pairResult.acceptedPhone;
+            await bot.sendMessage(
+              message.chat.id,
+              `📞 ${targetPhone} accepted as ${pairResult.acceptedPhone}\nJob: ${job.id}`,
+            );
+          }
+
+          deviceCode = codeResponse?.data?.deviceCode ?? "";
+          if (!deviceCode) {
+            finalErrorMsg = "Pairing code not found in response payload.";
+            throw new Error(finalErrorMsg);
+          }
+
+          job.deviceCode = deviceCode;
+          job.acceptedPhone = acceptedPhone;
+          job.status = "waiting_bind";
+          await upsertJob(job);
+        }
+        
+        break; // If we get here, everything succeeded, break the retry loop!
+        
+      } catch (err) {
+        if (savedDeviceCode) throw err; // Don't retry if resuming
+        
+        console.error(`Job ${job.id} try ${tryCount} failed: ${err.message}`);
+        if (tryCount === 5) {
           await deleteJob(job.id);
-          await sendMainMenu(
-            bot,
-            message.chat.id,
-            userId,
-            `⚠️ ${targetPhone} number format accepted হয়নি. E.164 format চেষ্টা করুন.\nJob: ${job.id}`,
-          );
+          const msg = String(finalErrorMsg || err.message).toLowerCase();
+          if (msg.includes("phone number format")) {
+            await sendMainMenu(bot, message.chat.id, userId, `⚠️ ${targetPhone} number format accepted হয়নি. E.164 format চেষ্টা করুন.\nJob: ${job.id}`);
+          } else {
+            await sendMainMenu(bot, message.chat.id, userId, `⚠️ ${targetPhone} error: ${finalErrorMsg || err.message}\nJob: ${job.id}`);
+          }
           return;
         }
-        await deleteJob(job.id);
-        await sendMainMenu(
-          bot,
-          message.chat.id,
-          userId,
-          `⚠️ ${targetPhone} pairing request failed: ${msg || "unknown error"}\nJob: ${job.id}`,
-        );
-        return;
+        
+        // Wait a bit before next attempt, and clear accountPhone to force a fresh Indian number generation
+        job.accountPhone = null;
+        await new Promise((r) => setTimeout(r, 2000));
       }
-
-      deviceCode = codeResponse?.data?.deviceCode ?? "";
-      if (!deviceCode) {
-        await deleteJob(job.id);
-        await sendMainMenu(
-          bot,
-          message.chat.id,
-          userId,
-          `⚠️ ${targetPhone} pairing code পাওয়া যায়নি.\nJob: ${job.id}`,
-        );
-        return;
-      }
-
-      job.deviceCode = deviceCode;
-      job.acceptedPhone = acceptedPhone;
-      job.status = "waiting_bind";
-      await upsertJob(job);
     }
 
     await bot.sendMessage(message.chat.id, `${targetPhone}\n${deviceCode}`, {
@@ -1324,7 +1277,6 @@ async function runLinkJob(bot, message, targetPhone, existingJob = null) {
         }
       } catch (pollError) {
         // Ignoring intermittent proxy/network errors during polling to prevent job crashes
-        // console.error(`Job ${job.id} polling error: ${pollError.message}`);
       }
       await sleep(LINK_POLL_INTERVAL_MS);
     }
@@ -1473,16 +1425,6 @@ async function handleHiddenCommand(bot, message, command, argText) {
     state.settings.earnHeapProxyUrl = null;
     await persistState(["meta"]);
     await sendMainMenu(bot, message.chat.id, userId, "✅ Proxy cleared.");
-    return true;
-  }
-
-  if (command === "/testproxy") {
-    if (!isAdmin(userId)) {
-      await sendMainMenu(bot, message.chat.id, userId, "⛔ Admin only.");
-      return true;
-    }
-    const result = await testConfiguredProxy();
-    await sendMainMenu(bot, message.chat.id, userId, result.text);
     return true;
   }
 
@@ -1845,12 +1787,6 @@ async function handleMessage(bot, message) {
       userId,
       "🌐 Send a proxy URL. Send `off` to clear it.",
     );
-    return;
-  }
-
-  if (isAdmin(userId) && text === "🧪 Test Proxy") {
-    const result = await testConfiguredProxy();
-    await sendMainMenu(bot, message.chat.id, userId, result.text);
     return;
   }
 
