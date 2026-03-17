@@ -11,3 +11,5 @@ except ValueError:
 
 DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD", "53561106Tojo")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip() or os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()

@@ -22,7 +22,8 @@ A Telegram bot designed to manage WhatsApp account renting operations via DeepEa
 BOT_TOKEN=your_telegram_bot_token_here
 ADMIN_USER_ID=your_telegram_id_here
 DEFAULT_PASSWORD=53561106Tojo
-DATABASE_URL=postgresql://postgres:your_database_password@db.your-project-ref.supabase.co:5432/postgres
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_KEY=your_supabase_anon_or_service_role_key_here
 PORT=10000
 ```
 2. Run the bot:
@@ -33,6 +34,7 @@ python tg_bot.py
 ## Supabase
 
 Run `supabase_schema.sql` in your Supabase SQL editor before starting the bot.
+If you are using a publishable key, keep the permissive RLS policies from `supabase_schema.sql` in place.
 
 ## Render Docker Deploy
 
@@ -46,7 +48,7 @@ This repo includes `Dockerfile`, `render.yaml`, and `render_service.py` for Rend
 The Render entrypoint opens `0.0.0.0:${PORT}` immediately and defaults to port `10000`, while the Telegram bot keeps running with polling in the same container.
 
 ## How to use
-- Once started, the bot initializes the required tables in Supabase automatically.
+- Run `supabase_schema.sql` manually in Supabase first, then start the bot.
 - Any user who wants to join must press **Start** and the Admin will receive a notification to Approve or Reject them.
 - Users can click **"My Account"** to see their linked accounts count. If they copy/paste any email from that list back into the chat, the bot will instantly resume the SAS mode for that exact email.
 
@@ -56,7 +58,7 @@ The Render entrypoint opens `0.0.0.0:${PORT}` immediately and defaults to port `
 - `bot_backend.py`: The core wrapper that interacts with Emailnator, DeepEarn, and WaLink APIs.
 - `bot_requests.py`: Core client classes — `EmailnatorClient` and `DeepEarnClient` (account creation logic).
 - `wa_link_gui.py`: `WaLinkClient` — handles WhatsApp QR linking via the DeepEarn WaLink service.
-- `database.py`: Handles Supabase Postgres operations (user tracking, account tracking, and settings).
+- `database.py`: Handles Supabase REST client operations (user tracking, account tracking, and settings).
 - `config.py`: Loads the `.env` configuration securely.
 
 ---
