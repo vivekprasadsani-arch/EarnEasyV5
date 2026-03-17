@@ -613,6 +613,7 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
         )
         
         try:
+            await db.add_account(user_id, country_code, email, password, invite_code)
             walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
             
             qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
@@ -683,6 +684,7 @@ async def handle_pasted_email(message: Message, state: FSMContext):
     )
     
     try:
+        await db.add_account(user_id, country_code, email, password, invite_code)
         walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
         
         qr_file = BufferedInputFile(qr_bytes, filename="qr.png")

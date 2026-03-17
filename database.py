@@ -190,18 +190,41 @@ async def add_account(user_id: int, site_id: str, email: str, password: str, inv
 
 
 async def mark_account_linked(user_id: int, site_id: str, email: str):
-    await asyncio.to_thread(
-        _request,
-        "PATCH",
-        "accounts",
-        params={
-            "user_id": f"eq.{int(user_id)}",
-            "site_id": f"eq.{site_id}",
-            "email": f"eq.{email}",
-        },
-        json={"is_linked": True},
-        prefer="return=minimal",
-    )
+    def _sync_mark_linked():
+        target = _fetch_first(
+            "accounts",
+            columns="id",
+            filters={
+                "user_id": f"eq.{int(user_id)}",
+                "site_id": f"eq.{site_id}",
+                "email": f"eq.{email}",
+                "is_linked": "eq.false",
+            },
+            order="created_at.desc",
+        )
+        if not target:
+            target = _fetch_first(
+                "accounts",
+                columns="id",
+                filters={
+                    "user_id": f"eq.{int(user_id)}",
+                    "site_id": f"eq.{site_id}",
+                    "email": f"eq.{email}",
+                },
+                order="created_at.desc",
+            )
+        if not target:
+            return
+
+        _request(
+            "PATCH",
+            "accounts",
+            params={"id": f"eq.{int(target['id'])}"},
+            json={"is_linked": True},
+            prefer="return=minimal",
+        )
+
+    await asyncio.to_thread(_sync_mark_linked)
 
 
 async def get_accounts_by_site(user_id: int, site_id: str):
