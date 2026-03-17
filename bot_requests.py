@@ -4,7 +4,6 @@ import random
 import string
 import time
 import uuid
-from dataclasses import dataclass
 
 import requests
 
@@ -26,9 +25,11 @@ class DeepEarnSigner:
 
 
 class EmailnatorClient:
-    def __init__(self, proxy_url=None):
+    def __init__(self, proxy_url=None, allow_proxy_fallback=True):
         self.session = requests.Session()
         self.session.trust_env = False
+        self.allow_proxy_fallback = allow_proxy_fallback
+        self.using_proxy = bool(proxy_url)
         if proxy_url:
             self.session.proxies.update({"http": proxy_url, "https": proxy_url})
         self.session.headers.update(
@@ -43,26 +44,58 @@ class EmailnatorClient:
         )
         self.init_session()
 
+    @staticmethod
+    def is_proxy_error(ex: Exception) -> bool:
+        if isinstance(ex, requests.exceptions.ProxyError):
+            return True
+        text = str(ex).lower()
+        return (
+            "proxy" in text
+            or "407" in text
+            or "remote end closed" in text
+            or "tunnel connection failed" in text
+        )
+
+    def _disable_proxy(self):
+        self.session.proxies.clear()
+        self.using_proxy = False
+
+    def _request(self, method, url, **kwargs):
+        try:
+            resp = self.session.request(method, url, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.RequestException as ex:
+            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+                self._disable_proxy()
+                resp = self.session.request(method, url, **kwargs)
+                resp.raise_for_status()
+                return resp
+            raise
+
     def init_session(self):
-        self.session.get("https://www.emailnator.com/", timeout=25)
+        self._request("GET", "https://www.emailnator.com/", timeout=25)
         xsrf_token = self.session.cookies.get("XSRF-TOKEN")
         if xsrf_token:
             self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
 
     def generate_email(self):
-        resp = self.session.post(
+        resp = self._request(
+            "POST",
             "https://www.emailnator.com/generate-email", json={"email": ["dotGmail"]}, timeout=25
         )
         return (resp.json().get("email") or [None])[0]
 
     def get_messages(self, email):
-        resp = self.session.post(
+        resp = self._request(
+            "POST",
             "https://www.emailnator.com/message-list", json={"email": email}, timeout=25
         )
         return resp.json().get("messageData", [])
 
     def get_message_content(self, email, message_id):
-        resp = self.session.post(
+        resp = self._request(
+            "POST",
             "https://www.emailnator.com/message-list",
             json={"email": email, "messageID": message_id},
             timeout=25,
@@ -71,12 +104,14 @@ class EmailnatorClient:
 
 
 class DeepEarnClient:
-    def __init__(self, inviter_code="57146564", proxy_url=None, domain="s1.ug5d.com"):
+    def __init__(self, inviter_code="57146564", proxy_url=None, domain="s1.ug5d.com", allow_proxy_fallback=True):
         self.inviter_code = inviter_code
         self.domain = domain
         self.base_url = f"https://{domain}"
         self.session = requests.Session()
         self.session.trust_env = False
+        self.allow_proxy_fallback = allow_proxy_fallback
+        self.using_proxy = bool(proxy_url)
         if proxy_url:
             self.session.proxies.update({"http": proxy_url, "https": proxy_url})
         self.signer = DeepEarnSigner()
@@ -98,6 +133,40 @@ class DeepEarnClient:
             ),
         }
 
+    @staticmethod
+    def is_proxy_error(ex: Exception) -> bool:
+        if isinstance(ex, requests.exceptions.ProxyError):
+            return True
+        text = str(ex).lower()
+        return (
+            "proxy" in text
+            or "407" in text
+            or "remote end closed" in text
+            or "tunnel connection failed" in text
+        )
+
+    def _disable_proxy(self):
+        self.session.proxies.clear()
+        self.using_proxy = False
+
+    def _request_post(self, path, data):
+        return self.session.post(
+            f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25
+        )
+
+    def _post(self, path, data):
+        try:
+            resp = self._request_post(path, data)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as ex:
+            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+                self._disable_proxy()
+                resp = self._request_post(path, data)
+                resp.raise_for_status()
+                return resp.json()
+            raise
+
     def prepare_headers(self, path, data):
         timestamp = str(int(time.time() * 1000))
         headers = self.default_headers.copy()
@@ -108,10 +177,7 @@ class DeepEarnClient:
     def send_otp(self, email):
         path = f"/api/v1/member/email/get?version={self.version}"
         data = {"email": email, "cf_token": "", "cf_key": "0x4AAAAAABHJvPhqTR_a9Mwu"}
-        resp = self.session.post(
-            f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25
-        )
-        return resp.json()
+        return self._post(path, data)
 
     def register(self, email, password, otp):
         path = f"/api/v1/member/reg?version={self.version}"
@@ -125,10 +191,7 @@ class DeepEarnClient:
             "cf_key": "0x4AAAAAABHJvPhqTR_a9Mwu",
             "code": otp,
         }
-        resp = self.session.post(
-            f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25
-        )
-        return resp.json()
+        return self._post(path, data)
 
 
 def generate_pwd(length=8):

@@ -65,19 +65,28 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
 
     def _sync_create():
         last_error = ""
+        current_step = "starting"
         for attempt in range(3):
             try:
-                email_client = EmailnatorClient(proxy_url=proxy)
+                current_step = "email generation"
+                email_client = EmailnatorClient(proxy_url=proxy, allow_proxy_fallback=True)
                 email = email_client.generate_email()
                 if not email:
                     raise RuntimeError("Failed to generate email")
 
-                earn_client = DeepEarnClient(inviter_code=invite_code, proxy_url=proxy, domain=domain)
+                current_step = "otp send"
+                earn_client = DeepEarnClient(
+                    inviter_code=invite_code,
+                    proxy_url=proxy,
+                    domain=domain,
+                    allow_proxy_fallback=True,
+                )
                 otp_resp = earn_client.send_otp(email)
                 if otp_resp.get("code") != 200:
                     raise RuntimeError(f"OTP send failed: {otp_resp.get('msg')}")
 
                 otp = None
+                current_step = "otp inbox polling"
                 for _ in range(20):
                     time.sleep(1.5)
                     msgs = email_client.get_messages(email)
@@ -94,6 +103,7 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 if not otp:
                     raise RuntimeError("Timeout waiting for OTP email")
 
+                current_step = "registration"
                 reg_resp = earn_client.register(email, password, otp)
                 if reg_resp.get("code") != 200:
                     raise RuntimeError(f"Registration failed: {reg_resp.get('msg')}")
@@ -104,7 +114,11 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 # Hide urls or proxy info
                 last_error = re.sub(r'https?://[^\s<]+', '<hidden_url>', last_error)
                 if "ProxyError" in last_error or "Remote end closed" in last_error:
-                    last_error = "Proxy connection dropped."
+                    last_error = f"{current_step}: Proxy connection dropped."
+                elif "proxy" in last_error.lower() and "dropped" in last_error.lower():
+                    last_error = f"{current_step}: Proxy connection dropped."
+                else:
+                    last_error = f"{current_step}: {last_error}"
                 time.sleep(2)
                 
         raise RuntimeError(f"Account creation failed after retries: {last_error}")
