@@ -1,9 +1,0 @@
-node_modules/
-bot_state.sqlite
-earnheap_bot_state.json
-oasis-numbers-465216-a9028800962f.json
-web.earnheap.com.har
-web.rupeerunner.cc.har
-.env
-.env.*
-npm-debug.log*
