@@ -1,9 +1,5 @@
 import hashlib
-import os
-import tempfile
-import threading
 import time
-import tkinter as tk
 import uuid
 from urllib.parse import urlparse
 
