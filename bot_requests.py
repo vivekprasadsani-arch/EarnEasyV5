@@ -1,9 +1,11 @@
 import hashlib
-import re
+import json
 import random
+import re
 import string
 import time
-import uuid
+from html import unescape
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -24,14 +26,25 @@ class DeepEarnSigner:
         return self.get_md5(f"{path}#{self.anon_uid}#{timestamp}#{payload}")
 
 
-class EmailnatorClient:
+def normalize_proxy_url(proxy_url: str) -> str:
+    value = (proxy_url or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if not parsed.scheme:
+        value = f"http://{value}"
+    return value
+
+
+class LegacyEmailnatorClient:
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
         self.session = requests.Session()
         self.session.trust_env = False
         self.allow_proxy_fallback = allow_proxy_fallback
-        self.using_proxy = bool(proxy_url)
-        if proxy_url:
-            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.using_proxy = bool(self.proxy_url)
+        if self.proxy_url:
+            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         self.session.headers.update(
             {
                 "User-Agent": (
@@ -103,6 +116,172 @@ class EmailnatorClient:
         return resp.text
 
 
+class EmailMuxClient:
+    BASE_URL = "https://emailmux.com"
+    API_SECRET = "yjd683c@47"
+    LOCALE = "en"
+
+    def __init__(self, proxy_url=None, allow_proxy_fallback=True):
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.allow_proxy_fallback = allow_proxy_fallback
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.using_proxy = bool(self.proxy_url)
+        if self.proxy_url:
+            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"{self.BASE_URL}/{self.LOCALE}/temporary-gmail",
+            }
+        )
+
+    @staticmethod
+    def is_proxy_error(ex: Exception) -> bool:
+        if isinstance(ex, requests.exceptions.ProxyError):
+            return True
+        text = str(ex).lower()
+        return (
+            "proxy" in text
+            or "407" in text
+            or "remote end closed" in text
+            or "tunnel connection failed" in text
+        )
+
+    def _disable_proxy(self):
+        self.session.proxies.clear()
+        self.using_proxy = False
+
+    def _request(self, method, url, **kwargs):
+        try:
+            resp = self.session.request(method, url, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.RequestException as ex:
+            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+                self._disable_proxy()
+                resp = self.session.request(method, url, **kwargs)
+                resp.raise_for_status()
+                return resp
+            raise
+
+    def _signed_headers(self, email: str) -> dict:
+        timestamp = str(int(time.time() * 1000))
+        signature = hashlib.md5(f"{self.API_SECRET}{email}{timestamp}".encode("utf-8")).hexdigest()
+        return {
+            "Content-Type": "application/json",
+            "X-API-Timestamp": timestamp,
+            "X-API-Signature": signature,
+        }
+
+    def _bootstrap_session(self):
+        self._request("GET", f"{self.BASE_URL}/domains", timeout=25)
+
+    def _activate_email(self, email: str):
+        resp = self._request(
+            "GET",
+            f"{self.BASE_URL}/use-email?email={quote(email)}",
+            headers=self._signed_headers(email),
+            timeout=25,
+        )
+        data = resp.json()
+        if data.get("status") != "success":
+            raise RuntimeError(f"EmailMux activation failed: {data.get('msg') or 'unknown error'}")
+
+    @staticmethod
+    def _extract_email_html(page_html: str) -> str:
+        match = re.search(
+            r'<script id="email-html-data" type="application/json">\s*"(.*?)"\s*</script>',
+            page_html,
+            re.S,
+        )
+        if not match:
+            return page_html
+        encoded = f'"{match.group(1)}"'
+        return unescape(json.loads(encoded))
+
+    def generate_email(self):
+        self._bootstrap_session()
+        resp = self._request(
+            "POST",
+            f"{self.BASE_URL}/generate-email",
+            json={"domains": ["gmail"]},
+            timeout=25,
+        )
+        data = resp.json()
+        if data.get("status") != "success":
+            raise RuntimeError(f"EmailMux generation failed: {data.get('msg') or 'unknown error'}")
+        email = (data.get("email") or "").strip()
+        if not email:
+            raise RuntimeError("EmailMux returned an empty email address")
+        self._activate_email(email)
+        return email
+
+    def get_messages(self, email):
+        resp = self._request(
+            "GET",
+            f"{self.BASE_URL}/emails?email={quote(email)}",
+            headers=self._signed_headers(email),
+            timeout=25,
+        )
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
+    def get_message_content(self, email, message_id):
+        resp = self._request(
+            "GET",
+            f"{self.BASE_URL}/{self.LOCALE}/email/{message_id}",
+            headers=self._signed_headers(email),
+            timeout=25,
+        )
+        return self._extract_email_html(resp.text)
+
+
+class EmailnatorClient:
+    def __init__(self, proxy_url=None, allow_proxy_fallback=True):
+        self.proxy_url = proxy_url
+        self.allow_proxy_fallback = allow_proxy_fallback
+        self._active_client = None
+
+    def _fallback_client(self):
+        return EmailMuxClient(proxy_url=self.proxy_url, allow_proxy_fallback=self.allow_proxy_fallback)
+
+    def generate_email(self):
+        legacy_error = None
+        try:
+            self._active_client = LegacyEmailnatorClient(
+                proxy_url=self.proxy_url,
+                allow_proxy_fallback=self.allow_proxy_fallback,
+            )
+            return self._active_client.generate_email()
+        except Exception as ex:
+            legacy_error = ex
+
+        self._active_client = self._fallback_client()
+        try:
+            return self._active_client.generate_email()
+        except Exception as fallback_error:
+            if legacy_error:
+                raise RuntimeError(
+                    f"Legacy Emailnator failed: {legacy_error}; EmailMux fallback failed: {fallback_error}"
+                ) from fallback_error
+            raise
+
+    def get_messages(self, email):
+        if not self._active_client:
+            raise RuntimeError("Email client is not initialized")
+        return self._active_client.get_messages(email)
+
+    def get_message_content(self, email, message_id):
+        if not self._active_client:
+            raise RuntimeError("Email client is not initialized")
+        return self._active_client.get_message_content(email, message_id)
+
+
 class DeepEarnClient:
     def __init__(self, inviter_code="57146564", proxy_url=None, domain="s1.ug5d.com", allow_proxy_fallback=True):
         self.inviter_code = inviter_code
@@ -111,9 +290,10 @@ class DeepEarnClient:
         self.session = requests.Session()
         self.session.trust_env = False
         self.allow_proxy_fallback = allow_proxy_fallback
-        self.using_proxy = bool(proxy_url)
-        if proxy_url:
-            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.using_proxy = bool(self.proxy_url)
+        if self.proxy_url:
+            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         self.signer = DeepEarnSigner()
         self.anon_uid = self.signer.anon_uid
         self.version = "13.5.1"

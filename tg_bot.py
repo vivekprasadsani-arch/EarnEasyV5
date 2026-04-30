@@ -13,6 +13,7 @@ from aiogram.filters import CommandStart, Command
 import config
 import database as db
 import bot_backend as backend
+from bot_requests import normalize_proxy_url
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -244,7 +245,7 @@ async def test_proxy_connection(cq: CallbackQuery):
         return
         
     user = await db.get_user(cq.from_user.id)
-    proxy = user['proxy']
+    proxy = normalize_proxy_url(user['proxy'])
     if not proxy:
         await safe_answer_callback(cq, "No proxy set to test.", show_alert=True)
         return
@@ -254,8 +255,14 @@ async def test_proxy_connection(cq: CallbackQuery):
     def _sync_test():
         import requests
         try:
-            res = requests.get("https://s1.n8o9.com", proxies={"http": proxy, "https": proxy}, timeout=10)
-            return True, f"✅ Proxy is working! (Status: {res.status_code})"
+            res = requests.get(
+                "https://httpbin.org/ip",
+                proxies={"http": proxy, "https": proxy},
+                timeout=15,
+            )
+            res.raise_for_status()
+            origin_ip = (res.json() or {}).get("origin", "unknown")
+            return True, f"✅ Proxy is working!\n\nIP: `{origin_ip}`"
         except Exception as e:
             return False, f"❌ Proxy failed.\n\n`{str(e)}`"
 
