@@ -1,10 +1,13 @@
+import asyncio
 import hashlib
 import json
 import random
 import re
 import string
+import sys
 import time
 from html import unescape
+from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import requests
@@ -34,6 +37,28 @@ def normalize_proxy_url(proxy_url: str) -> str:
     if not parsed.scheme:
         value = f"http://{value}"
     return value
+
+
+_CF_BYPASSER_CLASS = None
+
+
+def _load_camoufox_bypasser():
+    global _CF_BYPASSER_CLASS
+    if _CF_BYPASSER_CLASS is not None:
+        return _CF_BYPASSER_CLASS
+
+    repo_dir = Path(__file__).resolve().parent / "CloudflareBypassForScraping-main"
+    if not repo_dir.exists():
+        raise RuntimeError("CloudflareBypassForScraping-main repo was not found")
+
+    repo_path = str(repo_dir)
+    if repo_path not in sys.path:
+        sys.path.insert(0, repo_path)
+
+    from cf_bypasser.core.bypasser import CamoufoxBypasser
+
+    _CF_BYPASSER_CLASS = CamoufoxBypasser
+    return _CF_BYPASSER_CLASS
 
 
 class LegacyEmailnatorClient:
@@ -114,6 +139,62 @@ class LegacyEmailnatorClient:
             timeout=25,
         )
         return resp.text
+
+
+class BypassedEmailnatorClient(LegacyEmailnatorClient):
+    EMAILNATOR_URL = "https://www.emailnator.com/"
+
+    def init_session(self):
+        self._bootstrap_via_cloudflare_bypass()
+        xsrf_token = self.session.cookies.get("XSRF-TOKEN")
+        if xsrf_token:
+            self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
+
+    def _bootstrap_via_cloudflare_bypass(self):
+        last_error = None
+        if self.allow_proxy_fallback:
+            proxy_candidates = [None]
+            if self.proxy_url:
+                proxy_candidates.append(self.proxy_url)
+        else:
+            proxy_candidates = [self.proxy_url]
+
+        for proxy_candidate in proxy_candidates:
+            try:
+                bypasser_cls = _load_camoufox_bypasser()
+                cache_file = str(Path(__file__).resolve().with_name("cf_emailnator_cookie_cache.json"))
+                bypasser = bypasser_cls(max_retries=3, log=False, cache_file=cache_file)
+                data = asyncio.run(
+                    bypasser.get_or_generate_html(
+                        self.EMAILNATOR_URL,
+                        proxy=proxy_candidate,
+                        bypass_cache=False,
+                    )
+                )
+                if not data or not data.get("cookies"):
+                    raise RuntimeError("Cloudflare bypass returned no cookies")
+
+                self.session.headers["User-Agent"] = data.get("user_agent") or self.session.headers["User-Agent"]
+                self.session.headers["Referer"] = self.EMAILNATOR_URL
+                self.session.headers["Origin"] = self.EMAILNATOR_URL.rstrip("/")
+
+                self.session.cookies.clear()
+                for cookie_name, cookie_value in (data.get("cookies") or {}).items():
+                    self.session.cookies.set(cookie_name, cookie_value, domain="www.emailnator.com")
+
+                if proxy_candidate:
+                    self.session.proxies.update({"http": proxy_candidate, "https": proxy_candidate})
+                    self.using_proxy = True
+                else:
+                    self.session.proxies.clear()
+                    self.using_proxy = False
+                return
+            except Exception as ex:
+                last_error = ex
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Cloudflare bypass bootstrap failed")
 
 
 class EmailMuxClient:
@@ -270,11 +351,18 @@ class EmailnatorClient:
         self.allow_proxy_fallback = allow_proxy_fallback
         self._active_client = None
 
+    def _bypassed_emailnator_client(self):
+        return BypassedEmailnatorClient(
+            proxy_url=self.proxy_url,
+            allow_proxy_fallback=self.allow_proxy_fallback,
+        )
+
     def _fallback_client(self):
         return EmailMuxClient(proxy_url=self.proxy_url, allow_proxy_fallback=self.allow_proxy_fallback)
 
     def generate_email(self):
         legacy_error = None
+        bypass_error = None
         try:
             self._active_client = LegacyEmailnatorClient(
                 proxy_url=self.proxy_url,
@@ -284,13 +372,21 @@ class EmailnatorClient:
         except Exception as ex:
             legacy_error = ex
 
+        try:
+            self._active_client = self._bypassed_emailnator_client()
+            return self._active_client.generate_email()
+        except Exception as ex:
+            bypass_error = ex
+
         self._active_client = self._fallback_client()
         try:
             return self._active_client.generate_email()
         except Exception as fallback_error:
-            if legacy_error:
+            if legacy_error or bypass_error:
                 raise RuntimeError(
-                    f"Legacy Emailnator failed: {legacy_error}; EmailMux fallback failed: {fallback_error}"
+                    f"Legacy Emailnator failed: {legacy_error}; "
+                    f"Bypassed Emailnator failed: {bypass_error}; "
+                    f"EmailMux fallback failed: {fallback_error}"
                 ) from fallback_error
             raise
 
