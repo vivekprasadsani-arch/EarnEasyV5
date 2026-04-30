@@ -9,7 +9,7 @@ from bot_requests import DeepEarnClient, EmailnatorClient, generate_pwd
 from wa_link_gui import WaLinkClient
 
 SITES = {
-    "india": "s1.n8o9.com",
+    "india": "new-india.rj5d.com",
     "pakistan": "p1.x7bb.com",
     "south_africa": "a1.8xy5.com",
     "nigeria": "n1.9uot.com"

@@ -25,6 +25,7 @@ class WaLinkClient:
     DOMAIN_VERSION_MAP = {
         "p1.x7bb.com": "13.5.1",
         "s1.n8o9.com": "13.5.1",
+        "new-india.rj5d.com": "13.5.1",
         "a1.8xy5.com": "13.5.1",
         "n1.9uot.com": "13.5.1"
     }
