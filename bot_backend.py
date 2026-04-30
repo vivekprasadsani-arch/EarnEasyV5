@@ -92,7 +92,10 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                     msgs = email_client.get_messages(email)
                     for m in msgs:
                         if "Verification code" in m.get("subject", "") or "registration" in m.get("subject", "").lower() or "code" in m.get("subject", "").lower():
-                            content = email_client.get_message_content(email, m.get("messageID"))
+                            message_id = m.get("messageID") or m.get("uuid")
+                            if not message_id:
+                                continue
+                            content = email_client.get_message_content(email, message_id)
                             match = re.search(r">(\d{6})<", content) or re.search(r"color: red.*?(\d{6})", content) or re.search(r'\b\d{6}\b', content)
                             if match:
                                 otp = match.group(1) if match.lastindex else match.group(0)

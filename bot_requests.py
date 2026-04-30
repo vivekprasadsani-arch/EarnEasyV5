@@ -204,22 +204,36 @@ class EmailMuxClient:
         encoded = f'"{match.group(1)}"'
         return unescape(json.loads(encoded))
 
+    @staticmethod
+    def _is_deepearn_compatible_email(email: str) -> bool:
+        local_part, _, domain = (email or "").partition("@")
+        return bool(local_part) and domain.lower() == "gmail.com" and "+" not in local_part
+
     def generate_email(self):
         self._bootstrap_session()
-        resp = self._request(
-            "POST",
-            f"{self.BASE_URL}/generate-email",
-            json={"domains": ["gmail"]},
-            timeout=25,
-        )
-        data = resp.json()
-        if data.get("status") != "success":
-            raise RuntimeError(f"EmailMux generation failed: {data.get('msg') or 'unknown error'}")
-        email = (data.get("email") or "").strip()
-        if not email:
-            raise RuntimeError("EmailMux returned an empty email address")
-        self._activate_email(email)
-        return email
+        last_error = None
+        for _ in range(8):
+            resp = self._request(
+                "POST",
+                f"{self.BASE_URL}/generate-email",
+                json={"domains": ["gmail"]},
+                timeout=25,
+            )
+            data = resp.json()
+            if data.get("status") != "success":
+                raise RuntimeError(f"EmailMux generation failed: {data.get('msg') or 'unknown error'}")
+            email = (data.get("email") or "").strip()
+            if not email:
+                last_error = RuntimeError("EmailMux returned an empty email address")
+                continue
+            self._activate_email(email)
+            if self._is_deepearn_compatible_email(email):
+                return email
+            last_error = RuntimeError(f"EmailMux generated unsupported alias: {email}")
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("EmailMux could not generate a supported gmail address")
 
     def get_messages(self, email):
         resp = self._request(
@@ -229,7 +243,16 @@ class EmailMuxClient:
             timeout=25,
         )
         data = resp.json()
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        normalized = []
+        for item in data:
+            if isinstance(item, dict):
+                clone = dict(item)
+                if clone.get("uuid") and not clone.get("messageID"):
+                    clone["messageID"] = clone["uuid"]
+                normalized.append(clone)
+        return normalized
 
     def get_message_content(self, email, message_id):
         resp = self._request(
