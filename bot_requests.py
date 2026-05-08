@@ -7,10 +7,13 @@ import string
 import sys
 import time
 from html import unescape
+import logging
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 class DeepEarnSigner:
@@ -419,6 +422,60 @@ class EmailnatorClient:
     def _fallback_client(self):
         return EmailMuxClient(proxy_url=self.proxy_url, allow_proxy_fallback=self.allow_proxy_fallback)
 
+    @staticmethod
+    def _is_forbidden_error(ex: Exception) -> bool:
+        if isinstance(ex, requests.exceptions.HTTPError):
+            response = getattr(ex, "response", None)
+            if response is not None and response.status_code == 403:
+                return True
+        text = str(ex).lower()
+        return "403" in text and "forbidden" in text
+
+    def _recovery_candidates(self):
+        legacy_factory = lambda: LegacyEmailnatorClient(
+            proxy_url=self.proxy_url,
+            allow_proxy_fallback=self.allow_proxy_fallback,
+        )
+        provider_map = {
+            "legacy_emailnator": [
+                ("bypassed_emailnator", self._bypassed_emailnator_client),
+                ("legacy_emailnator", legacy_factory),
+            ],
+            "bypassed_emailnator": [
+                ("bypassed_emailnator", self._bypassed_emailnator_client),
+                ("legacy_emailnator", legacy_factory),
+            ],
+            "emailmux_fallback": [
+                ("emailmux_fallback", self._fallback_client),
+            ],
+        }
+        return provider_map.get(self._provider_name, [])
+
+    def _recover_inbox_client(self, email: str) -> bool:
+        previous_provider = self._provider_name
+        previous_client = self._active_client
+        for provider_name, factory in self._recovery_candidates():
+            client = None
+            try:
+                client = factory()
+                if hasattr(client, "_ensure_email_active"):
+                    client._ensure_email_active(email, force=True)
+                self._set_active_client(client, provider_name)
+                logger.info("Recovered inbox client for %s: %s -> %s", email, previous_provider, provider_name)
+                return True
+            except Exception as recovery_error:
+                self._close_client(client)
+                logger.warning(
+                    "Inbox recovery failed for %s via %s: %s",
+                    email,
+                    provider_name,
+                    recovery_error,
+                )
+
+        self._active_client = previous_client
+        self._provider_name = previous_provider
+        return False
+
     def generate_email(self):
         import os
         # If SKIP_BROWSER_BYPASS=1 (e.g. on Render free tier to avoid OOM),
@@ -466,12 +523,22 @@ class EmailnatorClient:
     def get_messages(self, email):
         if not self._active_client:
             raise RuntimeError("Email client is not initialized")
-        return self._active_client.get_messages(email)
+        try:
+            return self._active_client.get_messages(email)
+        except Exception as ex:
+            if self._is_forbidden_error(ex) and self._recover_inbox_client(email):
+                return self._active_client.get_messages(email)
+            raise
 
     def get_message_content(self, email, message_id):
         if not self._active_client:
             raise RuntimeError("Email client is not initialized")
-        return self._active_client.get_message_content(email, message_id)
+        try:
+            return self._active_client.get_message_content(email, message_id)
+        except Exception as ex:
+            if self._is_forbidden_error(ex) and self._recover_inbox_client(email):
+                return self._active_client.get_message_content(email, message_id)
+            raise
 
     def close(self):
         self._close_client(self._active_client)

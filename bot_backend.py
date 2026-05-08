@@ -23,6 +23,7 @@ OTP_SUBJECT_HINTS = ("verification", "verify", "code", "registration", "otp", "c
 OTP_POLL_INTERVAL_SECONDS = 3
 OTP_MAX_POLLS = 50
 OTP_RESEND_POLLS = {12, 28}
+MAX_EMAIL_CANDIDATES_PER_ATTEMPT = 5
 
 
 def _close_quietly(client):
@@ -135,23 +136,44 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
         for attempt in range(3):
             email_client = None
             earn_client = None
+            email = ""
             try:
-                current_step = "email generation"
-                email_client = EmailnatorClient(proxy_url=proxy, allow_proxy_fallback=True)
-                email = email_client.generate_email()
-                if not email:
-                    raise RuntimeError("Failed to generate email")
-
-                current_step = "otp send"
                 earn_client = DeepEarnClient(
                     inviter_code=invite_code,
                     proxy_url=proxy,
                     domain=domain,
                     allow_proxy_fallback=True,
                 )
-                otp_resp = earn_client.send_otp(email)
-                if otp_resp.get("code") != 200:
-                    raise RuntimeError(f"OTP send failed: {otp_resp.get('msg')}")
+
+                current_step = "email generation"
+                for email_try in range(MAX_EMAIL_CANDIDATES_PER_ATTEMPT):
+                    _close_quietly(email_client)
+                    email_client = EmailnatorClient(proxy_url=proxy, allow_proxy_fallback=True)
+                    email = email_client.generate_email()
+                    if not email:
+                        raise RuntimeError("Failed to generate email")
+
+                    current_step = "otp send"
+                    otp_resp = earn_client.send_otp(email)
+                    if otp_resp.get("code") == 200:
+                        break
+
+                    otp_error = str(otp_resp.get("msg") or "").strip()
+                    if "registered" in otp_error.lower():
+                        logger.info(
+                            "Generated email already registered on attempt %s candidate %s: %s",
+                            attempt + 1,
+                            email_try + 1,
+                            email,
+                        )
+                        current_step = "email generation"
+                        continue
+
+                    raise RuntimeError(f"OTP send failed: {otp_error or 'unknown error'}")
+                else:
+                    raise RuntimeError(
+                        f"Could not get an unregistered email after {MAX_EMAIL_CANDIDATES_PER_ATTEMPT} tries"
+                    )
 
                 otp = None
                 current_step = "otp inbox polling"
