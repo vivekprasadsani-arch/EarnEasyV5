@@ -161,12 +161,12 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
 
     def _bootstrap_via_cloudflare_bypass(self):
         last_error = None
-        if self.allow_proxy_fallback:
-            proxy_candidates = [None]
-            if self.proxy_url:
-                proxy_candidates.append(self.proxy_url)
-        else:
+        if self.proxy_url and self.allow_proxy_fallback:
+            proxy_candidates = [self.proxy_url, None]
+        elif self.proxy_url:
             proxy_candidates = [self.proxy_url]
+        else:
+            proxy_candidates = [None]
 
         for proxy_candidate in proxy_candidates:
             try:
@@ -217,6 +217,8 @@ class EmailMuxClient:
         self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
+        self._active_email = ""
+        self._active_email_ts = 0.0
         if self.proxy_url:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         self.session.headers.update(
@@ -281,6 +283,14 @@ class EmailMuxClient:
         data = resp.json()
         if data.get("status") != "success":
             raise RuntimeError(f"EmailMux activation failed: {data.get('msg') or 'unknown error'}")
+        self._active_email = email
+        self._active_email_ts = time.time()
+
+    def _ensure_email_active(self, email: str, *, force: bool = False):
+        same_email = email and email == self._active_email
+        recently_activated = (time.time() - self._active_email_ts) < 20
+        if force or not same_email or not recently_activated:
+            self._activate_email(email)
 
     @staticmethod
     def _extract_email_html(page_html: str) -> str:
@@ -316,7 +326,7 @@ class EmailMuxClient:
             if not email:
                 last_error = RuntimeError("EmailMux returned an empty email address")
                 continue
-            self._activate_email(email)
+            self._ensure_email_active(email, force=True)
             if self._is_deepearn_compatible_email(email):
                 return email
             last_error = RuntimeError(f"EmailMux generated unsupported alias: {email}")
@@ -326,6 +336,7 @@ class EmailMuxClient:
         raise RuntimeError("EmailMux could not generate a supported gmail address")
 
     def get_messages(self, email):
+        self._ensure_email_active(email)
         resp = self._request(
             "GET",
             f"{self.BASE_URL}/emails?email={quote(email)}",
@@ -345,6 +356,7 @@ class EmailMuxClient:
         return normalized
 
     def get_message_content(self, email, message_id):
+        self._ensure_email_active(email)
         resp = self._request(
             "GET",
             f"{self.BASE_URL}/{self.LOCALE}/email/{message_id}",
@@ -365,6 +377,38 @@ class EmailnatorClient:
         self.proxy_url = proxy_url
         self.allow_proxy_fallback = allow_proxy_fallback
         self._active_client = None
+        self._provider_name = "uninitialized"
+
+    @property
+    def provider_name(self):
+        return self._provider_name
+
+    def _close_client(self, client):
+        if not client:
+            return
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    def _set_active_client(self, client, provider_name):
+        if self._active_client and self._active_client is not client:
+            self._close_client(self._active_client)
+        self._active_client = client
+        self._provider_name = provider_name
+
+    def _attempt_generate(self, provider_name, factory):
+        client = None
+        try:
+            client = factory()
+            email = client.generate_email()
+            if not email:
+                raise RuntimeError(f"{provider_name} returned an empty email address")
+            self._set_active_client(client, provider_name)
+            return email, None
+        except Exception as ex:
+            self._close_client(client)
+            return None, ex
 
     def _bypassed_emailnator_client(self):
         return BypassedEmailnatorClient(
@@ -380,41 +424,44 @@ class EmailnatorClient:
         # If SKIP_BROWSER_BYPASS=1 (e.g. on Render free tier to avoid OOM),
         # skip Camoufox entirely and go straight to EmailMuxClient.
         skip_browser = os.getenv("SKIP_BROWSER_BYPASS", "").strip() in ("1", "true", "yes")
+        self.close()
 
         legacy_error = None
         bypass_error = None
 
         if not skip_browser:
-            try:
-                self._active_client = LegacyEmailnatorClient(
+            email, legacy_error = self._attempt_generate(
+                "legacy_emailnator",
+                lambda: LegacyEmailnatorClient(
                     proxy_url=self.proxy_url,
                     allow_proxy_fallback=self.allow_proxy_fallback,
-                )
-                return self._active_client.generate_email()
-            except Exception as ex:
-                legacy_error = ex
+                ),
+            )
+            if email:
+                return email
 
-            try:
-                self._active_client = self._bypassed_emailnator_client()
-                return self._active_client.generate_email()
-            except Exception as ex:
-                bypass_error = ex
+            email, bypass_error = self._attempt_generate(
+                "bypassed_emailnator",
+                self._bypassed_emailnator_client,
+            )
+            if email:
+                return email
         else:
             # Skip legacy + browser bypass, log why
             legacy_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
             bypass_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
 
-        self._active_client = self._fallback_client()
-        try:
-            return self._active_client.generate_email()
-        except Exception as fallback_error:
-            if legacy_error or bypass_error:
-                raise RuntimeError(
-                    f"Legacy Emailnator failed: {legacy_error}; "
-                    f"Bypassed Emailnator failed: {bypass_error}; "
-                    f"EmailMux fallback failed: {fallback_error}"
-                ) from fallback_error
-            raise
+        email, fallback_error = self._attempt_generate("emailmux_fallback", self._fallback_client)
+        if email:
+            return email
+
+        if legacy_error or bypass_error:
+            raise RuntimeError(
+                f"Legacy Emailnator failed: {legacy_error}; "
+                f"Bypassed Emailnator failed: {bypass_error}; "
+                f"EmailMux fallback failed: {fallback_error}"
+            ) from fallback_error
+        raise fallback_error
 
     def get_messages(self, email):
         if not self._active_client:
@@ -425,6 +472,11 @@ class EmailnatorClient:
         if not self._active_client:
             raise RuntimeError("Email client is not initialized")
         return self._active_client.get_message_content(email, message_id)
+
+    def close(self):
+        self._close_client(self._active_client)
+        self._active_client = None
+        self._provider_name = "uninitialized"
 
 
 DOMAIN_CURRENCY_MAP = {
