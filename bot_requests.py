@@ -376,22 +376,33 @@ class EmailnatorClient:
         return EmailMuxClient(proxy_url=self.proxy_url, allow_proxy_fallback=self.allow_proxy_fallback)
 
     def generate_email(self):
+        import os
+        # If SKIP_BROWSER_BYPASS=1 (e.g. on Render free tier to avoid OOM),
+        # skip Camoufox entirely and go straight to EmailMuxClient.
+        skip_browser = os.getenv("SKIP_BROWSER_BYPASS", "").strip() in ("1", "true", "yes")
+
         legacy_error = None
         bypass_error = None
-        try:
-            self._active_client = LegacyEmailnatorClient(
-                proxy_url=self.proxy_url,
-                allow_proxy_fallback=self.allow_proxy_fallback,
-            )
-            return self._active_client.generate_email()
-        except Exception as ex:
-            legacy_error = ex
 
-        try:
-            self._active_client = self._bypassed_emailnator_client()
-            return self._active_client.generate_email()
-        except Exception as ex:
-            bypass_error = ex
+        if not skip_browser:
+            try:
+                self._active_client = LegacyEmailnatorClient(
+                    proxy_url=self.proxy_url,
+                    allow_proxy_fallback=self.allow_proxy_fallback,
+                )
+                return self._active_client.generate_email()
+            except Exception as ex:
+                legacy_error = ex
+
+            try:
+                self._active_client = self._bypassed_emailnator_client()
+                return self._active_client.generate_email()
+            except Exception as ex:
+                bypass_error = ex
+        else:
+            # Skip legacy + browser bypass, log why
+            legacy_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
+            bypass_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
 
         self._active_client = self._fallback_client()
         try:
@@ -417,10 +428,10 @@ class EmailnatorClient:
 
 
 DOMAIN_CURRENCY_MAP = {
-    "p1.x7bb.com":        "Pakistan",
-    "new-india.rj5d.com": "India",
-    "a1.8xy5.com":        "SouthAfrica",
-    "n1.9uot.com":        "Nigeria",
+    "p1.x7bb.com":   "Pakistan",
+    "s1.4e22.com":   "India",
+    "a1.8xy5.com":   "SouthAfrica",
+    "n1.9uot.com":   "Nigeria",
 }
 
 
@@ -485,13 +496,21 @@ class DeepEarnClient:
         try:
             resp = self._request_post(path, data)
             resp.raise_for_status()
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError:
+                preview = resp.text[:300].strip()
+                return {"code": -1, "msg": f"Non-JSON response (HTTP {resp.status_code}): {preview}"}
         except requests.exceptions.RequestException as ex:
             if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
                 self._disable_proxy()
                 resp = self._request_post(path, data)
                 resp.raise_for_status()
-                return resp.json()
+                try:
+                    return resp.json()
+                except ValueError:
+                    preview = resp.text[:300].strip()
+                    return {"code": -1, "msg": f"Non-JSON response after proxy fallback (HTTP {resp.status_code}): {preview}"}
             raise
 
     def prepare_headers(self, path, data):
