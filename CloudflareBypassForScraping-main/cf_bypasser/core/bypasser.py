@@ -95,7 +95,7 @@ class CamoufoxBypasser:
                 self.log_message("Failed to parse proxy, continuing without proxy")
 
         # Use global lock to serialize browser initialization (browserforge is not thread-safe)
-        async with get_browser_init_lock():
+        with get_browser_init_lock():
             camoufox = AsyncCamoufox(
                 headless=True,
                 geoip=True if proxy else False,

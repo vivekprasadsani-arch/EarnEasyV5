@@ -444,10 +444,10 @@ class EmailnatorClient:
     def _is_forbidden_error(ex: Exception) -> bool:
         if isinstance(ex, requests.exceptions.HTTPError):
             response = getattr(ex, "response", None)
-            if response is not None and response.status_code == 403:
+            if response is not None and response.status_code in (401, 403):
                 return True
         text = str(ex).lower()
-        return "403" in text and "forbidden" in text
+        return any(err in text for err in ("401", "403", "forbidden", "unauthorized"))
 
     def _recovery_candidates(self):
         legacy_factory = lambda: LegacyEmailnatorClient(

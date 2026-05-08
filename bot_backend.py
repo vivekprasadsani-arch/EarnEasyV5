@@ -23,7 +23,11 @@ OTP_SUBJECT_HINTS = ("verification", "verify", "code", "registration", "otp", "c
 OTP_POLL_INTERVAL_SECONDS = 3
 OTP_MAX_POLLS = 50
 OTP_RESEND_POLLS = {12, 28}
+<<<<<<< HEAD
 MAX_EMAIL_CANDIDATES_PER_ATTEMPT = 10
+=======
+MAX_EMAIL_CANDIDATES_PER_ATTEMPT = 5
+>>>>>>> origin/main
 
 
 def _close_quietly(client):
