@@ -204,20 +204,31 @@ async def set_user_proxy(user_id: int, proxy: str):
 
 
 async def add_account(user_id: int, site_id: str, email: str, password: str, invite_code: str):
-    await asyncio.to_thread(
-        _request,
-        "POST",
+    def _sync_add():
+        rows = _request(
+            "POST",
+            "accounts",
+            json=[
+                {
+                    "user_id": int(user_id),
+                    "site_id": site_id,
+                    "email": email,
+                    "password": password,
+                    "invite_code": invite_code,
+                }
+            ],
+            prefer="return=representation",
+        )
+        return rows[0]['id'] if rows else None
+    return await asyncio.to_thread(_sync_add)
+
+
+async def get_account_by_id(account_id: int):
+    """Retrieve a specific account record by its ID."""
+    return await asyncio.to_thread(
+        _fetch_first,
         "accounts",
-        json=[
-            {
-                "user_id": int(user_id),
-                "site_id": site_id,
-                "email": email,
-                "password": password,
-                "invite_code": invite_code,
-            }
-        ],
-        prefer="return=minimal",
+        filters={"id": f"eq.{int(account_id)}"}
     )
 
 

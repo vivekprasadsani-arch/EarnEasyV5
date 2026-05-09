@@ -500,7 +500,7 @@ async def generate_and_send_qr(message: Message, state: FSMContext, country_code
     try:
         # Create DeepEarn / Emailnator Account - This is internally serialized by REGISTRATION_LOCK
         email = await backend.create_account(country_code, invite_code, proxy, password)
-        await db.add_account(user_id, country_code, email, password, invite_code)
+        account_id = await db.add_account(user_id, country_code, email, password, invite_code)
         
         # Save email in state for SAS method reuse
         if state:
@@ -523,7 +523,7 @@ async def generate_and_send_qr(message: Message, state: FSMContext, country_code
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
              InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
-            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{country_code}_{email}_{returned_invite_code}")]
+            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{account_id}")]
         ])
         
         sent_qr = await message.answer_photo(
@@ -591,11 +591,17 @@ async def poll_for_success(message: Message, state: FSMContext, walink_client, d
 
 @router.callback_query(F.data.startswith("regen_"))
 async def handle_regenerate_qr(cq: CallbackQuery, state: FSMContext):
-    parts = cq.data.split("_")
-    # format: regen_countrycode_email_invitecode
-    country_code = "_".join(parts[1:-2])
-    email = parts[-2]
-    invite_code = parts[-1]
+    # format: regen_accountid
+    account_id = int(cq.data.split("_")[1])
+    
+    account = await db.get_account_by_id(account_id)
+    if not account:
+        await safe_answer_callback(cq, "❌ Error: Account not found in database.", show_alert=True)
+        return
+        
+    email = account['email']
+    invite_code = account['invite_code']
+    country_code = account['site_id']
     
     user_id = cq.from_user.id
     user_data = await db.get_user(user_id)
@@ -610,17 +616,17 @@ async def handle_regenerate_qr(cq: CallbackQuery, state: FSMContext):
     except:
         pass
         
-    status_msg = await cq.message.answer(f"🔄 Re-generating QR Code for {COUNTRIES[country_code]}... Please wait.")
+    status_msg = await cq.message.answer(f"🔄 Re-generating QR Code for {COUNTRIES.get(country_code, country_code)}... Please wait.")
         
     try:
         # We don't need to recreate the deep earn account, just re-login to WaLink
-        walink_client, device_id, _, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
+        walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
         
         qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
-             InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=invite_code)],
-            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{country_code}_{email}_{invite_code}")]
+             InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
+            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{account_id}")]
         ])
         
         new_msg = await cq.message.answer_photo(
