@@ -68,11 +68,21 @@ def add_notification_callback(callback):
         NOTIFICATION_CALLBACKS.append(callback)
 
 def notify_admin(message):
-    """Trigger all registered notification callbacks."""
+    """Trigger all registered notification callbacks safely across threads."""
     for cb in NOTIFICATION_CALLBACKS:
         try:
             if asyncio.iscoroutinefunction(cb):
-                asyncio.create_task(cb(message))
+                # worker threads don't have their own event loop, so we find the main one
+                try:
+                    # In a typical script, the main loop is in the main thread
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.call_soon_threadsafe(asyncio.create_task, cb(message))
+                    else:
+                        logger.error(f"Cannot notify admin: Loop not running. Msg: {message}")
+                except RuntimeError:
+                    # No loop in this thread, could try run_coroutine_threadsafe if we had a loop handle
+                    logger.error(f"Cannot notify admin: No loop in thread. Msg: {message}")
             else:
                 cb(message)
         except Exception as e:
@@ -83,6 +93,10 @@ def _load_camoufox_bypasser():
     if _CF_BYPASSER_CLASS is not None:
         return _CF_BYPASSER_CLASS
 
+    # Disable Camoufox update checks BEFORE importing to prevent GitHub API rate limit crashes
+    import os
+    os.environ["CAMOUFOX_ALLOW_UPDATE"] = "0"
+
     repo_dir = Path(__file__).resolve().parent / "CloudflareBypassForScraping-main"
     if not repo_dir.exists():
         raise RuntimeError("CloudflareBypassForScraping-main repo was not found")
@@ -92,6 +106,13 @@ def _load_camoufox_bypasser():
         sys.path.insert(0, repo_path)
 
     from cf_bypasser.core.bypasser import CamoufoxBypasser
+    
+    # Deeply suppress any update checks in camoufox
+    try:
+        import camoufox.utils as cf_utils
+        cf_utils.check_for_updates = lambda *args, **kwargs: None
+    except:
+        pass
 
     _CF_BYPASSER_CLASS = CamoufoxBypasser
     return _CF_BYPASSER_CLASS
