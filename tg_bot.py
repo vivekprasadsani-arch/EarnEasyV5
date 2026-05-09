@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import json
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F, Router
@@ -14,7 +15,18 @@ from aiogram.filters import CommandStart, Command
 import config
 import database as db
 import bot_backend as backend
-from bot_requests import normalize_proxy_url
+from bot_requests import normalize_proxy_url, add_notification_callback
+
+async def notify_admin_handler(message_text):
+    """Callback to notify admin when manual intervention is needed."""
+    if config.ADMIN_USER_ID:
+        try:
+            await bot.send_message(config.ADMIN_USER_ID, message_text)
+        except Exception as e:
+            logger.error(f"Failed to notify admin: {e}")
+
+# Register the callback
+add_notification_callback(notify_admin_handler)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,6 +40,7 @@ class BotStates(StatesGroup):
     waiting_for_invite = State()
     waiting_for_proxy = State()
     waiting_for_password = State()
+    waiting_for_cookies = State()
 
 COUNTRIES = {
     "india": "🇮🇳 India",
@@ -50,6 +63,7 @@ async def setup_bot_commands():
     await bot.set_my_commands([
         BotCommand(command="start", description="Open the main menu"),
         BotCommand(command="setpassword", description="Set your default account password"),
+        BotCommand(command="updatecookies", description="Update Emailnator cookies (Admin only)"),
     ])
 
 async def safe_edit_message(message: Message, text: str, parse_mode: str = None):
@@ -196,6 +210,51 @@ async def cmd_setpassword(message: Message, state: FSMContext):
         return
     await message.answer("🔑 Enter your new custom default password for accounts:")
     await state.set_state(BotStates.waiting_for_password)
+
+@router.message(Command("updatecookies"))
+async def cmd_updatecookies(message: Message, state: FSMContext):
+    if message.from_user.id != config.ADMIN_USER_ID:
+        await message.answer("❌ This command is only available for the Admin.")
+        return
+    await message.answer("📁 Please send the `manual_emailnator_cookies.json` file or paste the JSON content here:")
+    await state.set_state(BotStates.waiting_for_cookies)
+
+@router.message(BotStates.waiting_for_cookies)
+async def process_cookies(message: Message, state: FSMContext):
+    if message.from_user.id != config.ADMIN_USER_ID:
+        return
+        
+    content = ""
+    if message.document:
+        # Handle file upload
+        file_id = message.document.file_id
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
+        # Download and read file
+        from io import BytesIO
+        dest = BytesIO()
+        await bot.download_file(file_path, dest)
+        content = dest.getvalue().decode('utf-8')
+    elif message.text:
+        content = message.text.strip()
+    
+    if not content:
+        await message.answer("❌ No content found. Please send a file or text.")
+        return
+
+    try:
+        # Validate JSON
+        json_data = json.loads(content)
+        if "cookies" not in json_data:
+            raise ValueError("Invalid format: 'cookies' key missing.")
+            
+        with open("manual_emailnator_cookies.json", "w") as f:
+            json.dump(json_data, f, indent=4)
+            
+        await message.answer("✅ Emailnator cookies updated successfully!", reply_markup=main_keyboard())
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"❌ Failed to update cookies: {str(e)}")
 
 @router.message(BotStates.waiting_for_password)
 async def process_password(message: Message, state: FSMContext):

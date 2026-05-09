@@ -59,7 +59,23 @@ def normalize_proxy_url(proxy_url: str) -> str:
 
 
 _CF_BYPASSER_CLASS = None
+NOTIFICATION_CALLBACKS = []
 
+def add_notification_callback(callback):
+    """Add a callback function to be called when manual intervention is needed."""
+    if callback not in NOTIFICATION_CALLBACKS:
+        NOTIFICATION_CALLBACKS.append(callback)
+
+def notify_admin(message):
+    """Trigger all registered notification callbacks."""
+    for cb in NOTIFICATION_CALLBACKS:
+        try:
+            if asyncio.iscoroutinefunction(cb):
+                asyncio.create_task(cb(message))
+            else:
+                cb(message)
+        except Exception as e:
+            logger.error(f"Error in notification callback: {e}")
 
 def _load_camoufox_bypasser():
     global _CF_BYPASSER_CLASS
@@ -119,8 +135,8 @@ class LegacyEmailnatorClient:
             # When using curl_cffi impersonate, we only add minimal required headers
             self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
 
-    @staticmethod
-    def is_proxy_error(ex: Exception) -> bool:
+    def is_proxy_error(self, ex: Exception) -> bool:
+        """Check if the error is related to proxy connectivity."""
         if isinstance(ex, requests.exceptions.ProxyError):
             return True
         text = str(ex).lower()
@@ -255,6 +271,56 @@ class LegacyEmailnatorClient:
             pass
 
 
+class ManualEmailnatorClient(LegacyEmailnatorClient):
+    """Client that uses manually captured cookies from a JSON file."""
+    COOKIE_FILE = "manual_emailnator_cookies.json"
+
+    def __init__(self, proxy_url=None, allow_proxy_fallback=True):
+        self.allow_proxy_fallback = allow_proxy_fallback
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.using_proxy = bool(self.proxy_url)
+        
+        # We don't call _init_session_obj because we manually set headers/cookies
+        self.session = requests.Session()
+        self.session.trust_env = False
+        if self.proxy_url:
+            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
+        
+        self.init_session()
+
+    def init_session(self):
+        try:
+            if not os.path.exists(self.COOKIE_FILE):
+                raise FileNotFoundError(f"Manual cookie file {self.COOKIE_FILE} not found")
+                
+            with open(self.COOKIE_FILE, "r") as f:
+                data = json.load(f)
+            
+            self.session.headers.update({
+                "User-Agent": data.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+                "X-Requested-With": "XMLHttpRequest"
+            })
+            
+            # Load cookies into session
+            for name, value in data.get("cookies", {}).items():
+                self.session.cookies.set(name, value, domain="www.emailnator.com")
+            
+            # Verify if cookies work by hitting mailbox
+            self._update_xsrf_token()
+            self.session.headers.update({"Referer": "https://www.emailnator.com/"})
+            # Use _request to handle potential proxy issues but we expect 200/403 here
+            resp = self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
+            self._update_xsrf_token()
+            
+            logger.info("Manual cookies loaded and verified successfully")
+        except Exception as e:
+            logger.warning(f"Failed to load manual cookies: {e}")
+            # If manual cookies fail with 403, we notify admin
+            if "403" in str(e) or "forbidden" in str(e).lower():
+                notify_admin("⚠️ Manual Emailnator cookies have expired or been blocked. Please upload new cookies using /updatecookies")
+            raise
+
+
 class BypassedEmailnatorClient(LegacyEmailnatorClient):
     EMAILNATOR_URL = "https://www.emailnator.com/"
 
@@ -372,9 +438,14 @@ class EmailnatorClient:
             proxy_url=self.proxy_url,
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
+        manual_factory = lambda: ManualEmailnatorClient(
+            proxy_url=self.proxy_url,
+            allow_proxy_fallback=self.allow_proxy_fallback,
+        )
         
         # Strictly Emailnator only. NO EmailMux fallback allowed.
         return [
+            ("manual_emailnator", manual_factory),
             ("bypassed_emailnator", self._bypassed_emailnator_client),
             ("legacy_emailnator", legacy_factory)
         ]
@@ -407,7 +478,19 @@ class EmailnatorClient:
     def generate_email(self):
         self.close()
 
-        # 1. Try Bypassed Emailnator (Camoufox) first - it's the most reliable for 100% success
+        # 1. Try Manual Cookies first if file exists
+        if os.path.exists("manual_emailnator_cookies.json"):
+            email, manual_error = self._attempt_generate(
+                "manual_emailnator",
+                lambda: ManualEmailnatorClient(
+                    proxy_url=self.proxy_url,
+                    allow_proxy_fallback=self.allow_proxy_fallback,
+                ),
+            )
+            if email:
+                return email
+
+        # 2. Try Bypassed Emailnator (Camoufox) first - it's the most reliable for 100% success
         email, bypass_error = self._attempt_generate(
             "bypassed_emailnator",
             self._bypassed_emailnator_client,
