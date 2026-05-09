@@ -1,0 +1,24 @@
+"Upload succeeded
+==> Deploying...
+==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+Traceback (most recent call last):
+  File "/app/render_service.py", line 6, in <module>
+    import tg_bot
+  File "/app/tg_bot.py", line 15, in <module>
+    import bot_backend as backend
+  File "/app/bot_backend.py", line 26
+    <<<<<<< HEAD
+    ^^
+SyntaxError: invalid syntax
+==> Exited with status 1
+==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
+Traceback (most recent call last):
+  File "/app/render_service.py", line 6, in <module>
+    import tg_bot
+  File "/app/tg_bot.py", line 15, in <module>
+    import bot_backend as backend
+  File "/app/bot_backend.py", line 26
+    <<<<<<< HEAD
+    ^^
+Menu
+SyntaxError: invalid syntax"

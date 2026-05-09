@@ -395,33 +395,46 @@ async def ask_invite_code(cq: CallbackQuery, state: FSMContext):
 
 @router.message(BotStates.waiting_for_invite)
 async def process_invite(message: Message, state: FSMContext):
-    invite_code = message.text.strip()
+    text = message.text.strip()
+    # Support multiple invite codes separated by spaces, commas or newlines
+    invite_codes = re.findall(r'\d{7,12}', text)
+    
+    if not invite_codes:
+        # Fallback for single non-digit-only input if needed
+        invite_codes = [text]
+
     data = await state.get_data()
     country_code = data.get("country_code")
     method = data.get("method")
     
-    await state.update_data(invite_code=invite_code)
-    await generate_and_send_qr(message, state, message.from_user.id)
+    await state.clear() # Clear state so user can interact while tasks run
+
+    if len(invite_codes) > 1:
+        await message.answer(f"⏳ Detected {len(invite_codes)} invite codes. Processing them sequentially to ensure 100% success...")
+
+    for code in invite_codes:
+        asyncio.create_task(
+            generate_and_send_qr(
+                message, 
+                country_code=country_code, 
+                method=method, 
+                invite_code=code, 
+                user_id=message.from_user.id
+            )
+        )
 
 
-async def generate_and_send_qr(message: Message, state: FSMContext, user_id: int, message_to_edit: Message = None):
-    data = await state.get_data()
-    country_code = data.get("country_code")
-    method = data.get("method")
-    invite_code = data.get("invite_code")
-    
+async def generate_and_send_qr(message: Message, country_code: str, method: str, invite_code: str, user_id: int, message_to_edit: Message = None):
     if message_to_edit:
         try:
-            # We can't easily edit a photo with just text without changing the media type, 
-            # so we just delete it and send a new "Preparing..." text message.
             await message_to_edit.delete()
-            status_msg = await message.answer(f"🔄 Preparing next account for {COUNTRIES[country_code]}...")
+            status_msg = await message.answer(f"🔄 [Queue] Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
             is_photo = False
         except:
-            status_msg = await message.answer(f"🔄 Preparing next account for {COUNTRIES[country_code]}...")
+            status_msg = await message.answer(f"🔄 [Queue] Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
             is_photo = False
     else:
-        status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES[country_code]}...")
+        status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}...")
         is_photo = False
     
     user_data = await db.get_user(user_id)
@@ -429,12 +442,9 @@ async def generate_and_send_qr(message: Message, state: FSMContext, user_id: int
     password = user_data['custom_password'] or config.DEFAULT_PASSWORD
     
     try:
-        # Create DeepEarn / Emailnator Account
+        # Create DeepEarn / Emailnator Account - This is internally serialized by REGISTRATION_LOCK
         email = await backend.create_account(country_code, invite_code, proxy, password)
         await db.add_account(user_id, country_code, email, password, invite_code)
-        
-        # Save email in state for SAS method reuse
-        await state.update_data(current_email=email)
         
         if is_photo:
             await status_msg.edit_caption(caption=f"🔄 Account created `({email})`! Generating QR...", parse_mode="Markdown")
@@ -465,20 +475,15 @@ async def generate_and_send_qr(message: Message, state: FSMContext, user_id: int
         await safe_delete_message(status_msg)
         
         # Start Polling
-        asyncio.create_task(poll_for_success(sent_qr, state, walink_client, device_id, returned_invite_code, email, method, country_code))
-        await state.set_state(None) # Done with input FSM
+        asyncio.create_task(poll_for_success(sent_qr, None, walink_client, device_id, returned_invite_code, email, method, country_code))
         
     except Exception as e:
         logger.error(f"Error generating QR: {e}")
+        error_text = f"❌ Error during account creation.\n\n`{str(e)}`"
         if is_photo:
-            await status_msg.edit_caption(caption=f"❌ Error during account creation.\n\n`{str(e)}`", parse_mode="Markdown")
+            await status_msg.edit_caption(caption=error_text, parse_mode="Markdown")
         else:
-            await safe_edit_message(
-                status_msg,
-                f"❌ Error during account creation.\n\n`{str(e)}`",
-                parse_mode="Markdown",
-            )
-        await state.clear()
+            await safe_edit_message(status_msg, error_text, parse_mode="Markdown")
 
 
 async def poll_for_success(message: Message, state: FSMContext, walink_client, device_id, invite_code, email, method, country_code):
