@@ -92,9 +92,16 @@ class LegacyEmailnatorClient:
 
     def _init_session_obj(self, proxy_url=None):
         imp = self.impersonates[self.current_impersonate_idx % len(self.impersonates)]
+        
         if curl_requests:
-            # Use HTTP/1.1 to avoid some proxy issues
-            self.session = curl_requests.Session(impersonate=imp)
+            try:
+                # Force http_version=1 (HTTP/1.1) to avoid 'Proxy CONNECT aborted' errors
+                # This is more compatible with many proxy providers like OwlProxy
+                self.session = curl_requests.Session(impersonate=imp, http_version=1)
+            except Exception as e:
+                logger.warning(f"curl_cffi session init failed: {e}. Falling back to requests.")
+                self.session = requests.Session()
+                self.session.trust_env = False
         else:
             self.session = requests.Session()
             self.session.trust_env = False
@@ -103,25 +110,15 @@ class LegacyEmailnatorClient:
             p = normalize_proxy_url(proxy_url)
             self.session.proxies.update({"http": p, "https": p})
             
-        if not curl_requests:
+        if not hasattr(self.session, "impersonate"):
             self.session.headers.update({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
                 "X-Requested-With": "XMLHttpRequest",
             })
         else:
+            # When using curl_cffi impersonate, we only add minimal required headers
             self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
-
-    @staticmethod
-    def is_proxy_error(ex: Exception) -> bool:
-        if isinstance(ex, requests.exceptions.ProxyError):
-            return True
-        text = str(ex).lower()
-        return any(err in text for err in ("proxy", "407", "remote end closed", "tunnel connection failed", "curl error 56", "curl error 35"))
-
-    def _disable_proxy(self):
-        self.session.proxies.clear()
-        self.using_proxy = False
 
     def _request(self, method, url, **kwargs):
         last_ex = None
@@ -139,8 +136,37 @@ class LegacyEmailnatorClient:
                     continue
                 resp.raise_for_status()
                 return resp
-            except requests.exceptions.RequestException as ex:
+            except Exception as ex:
                 last_ex = ex
+                err_str = str(ex).lower()
+                # Handle curl_cffi proxy errors (56, 35, etc)
+                if any(e in err_str for e in ("curl error 56", "proxy connect aborted", "curl error 35")):
+                    logger.warning(f"Proxy error with curl_cffi: {ex}. Attempting protocol switch...")
+                    # Try changing impersonation immediately for proxy errors
+                    self.current_impersonate_idx += 1
+                    self._init_session_obj(self.proxy_url if self.using_proxy else None)
+                    
+                    if attempt > 2: # After a few tries, fall back to standard requests
+                        logger.warning("Switching to standard requests fallback...")
+                        old_session = self.session
+                        self.session = requests.Session()
+                        self.session.trust_env = False
+                        if self.using_proxy:
+                            p = normalize_proxy_url(self.proxy_url)
+                            self.session.proxies.update({"http": p, "https": p})
+                        self.session.headers.update({
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                            "Accept": "application/json, text/plain, */*",
+                            "X-Requested-With": "XMLHttpRequest",
+                        })
+                        try:
+                            res = self.session.request(method, url, **kwargs)
+                            res.raise_for_status()
+                            return res
+                        except Exception:
+                            self.session = old_session # Restore if fallback also fails
+                            pass
+
                 if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
                     self._disable_proxy()
                     return self._request(method, url, **kwargs)
@@ -621,7 +647,8 @@ class DeepEarnClient:
         self.using_proxy = bool(self.proxy_url)
         
         if curl_requests:
-            self.session = curl_requests.Session(impersonate="chrome110")
+            # Use http_version=1 to avoid 'Proxy CONNECT aborted' errors
+            self.session = curl_requests.Session(impersonate="chrome110", http_version=1)
         else:
             self.session = requests.Session()
             self.session.trust_env = False
