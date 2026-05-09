@@ -17,10 +17,18 @@ def capture():
         if proxy_url:
             launch_args['proxy'] = {'server': proxy_url}
             
-        # Launch browser in headful mode so user can see it
-        browser = p.chromium.launch(headless=False, **launch_args)
+        # Launch browser with stealth arguments
+        browser = p.chromium.launch(
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
+                "--no-sandbox"
+            ],
+            **launch_args
+        )
         context = browser.new_context(
-            viewport={'width': 1280, 'height': 720},
+            viewport=None, # Use maximized window
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         page = context.new_page()
