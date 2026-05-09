@@ -50,6 +50,13 @@ def _extract_otp(*sources):
     for source in sources:
         if not source:
             continue
+        # 1. Try patterns on RAW source (works best for HTML like <b>123456</b>)
+        for pattern in patterns:
+            match = re.search(pattern, str(source), re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1)
+                
+        # 2. Try patterns on normalized source (stripped of tags)
         normalized = re.sub(r"<[^>]+>", " ", str(source))
         normalized = re.sub(r"\s+", " ", normalized)
         for pattern in patterns:

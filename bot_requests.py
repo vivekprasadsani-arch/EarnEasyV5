@@ -124,13 +124,23 @@ class LegacyEmailnatorClient:
         raise RuntimeError("Max retries exceeded for email client")
 
     def init_session(self):
+        # 1. Load Homepage to get initial cookies
         self._request("GET", "https://www.emailnator.com/", timeout=25)
+        self._update_xsrf_token()
+        # 2. Hit mailbox endpoint to initialize session for inboxes
+        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
+        self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
+        self._update_xsrf_token()
+
+    def _update_xsrf_token(self):
         xsrf_token = self.session.cookies.get("XSRF-TOKEN")
         if xsrf_token:
+            # Use raw cookie value for X-XSRF-TOKEN header as seen in HAR
             self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
 
     def generate_email(self):
         # We'll try dotGmail specifically as it's more stable for DeepEarn
+        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
         resp = self._request(
             "POST",
             "https://www.emailnator.com/generate-email", 
@@ -140,9 +150,21 @@ class LegacyEmailnatorClient:
         email = (resp.json().get("email") or [None])[0]
         if not email:
             raise RuntimeError("Emailnator returned empty email list")
+        
+        # After generating, we 'visit' the mailbox to activate it
+        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
+        self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
+        self._update_xsrf_token()
+        
         return email
 
     def get_messages(self, email):
+        # Set referer to mailbox as seen in HAR
+        self.session.headers.update({
+            "Referer": "https://www.emailnator.com/mailbox/",
+            "Origin": "https://www.emailnator.com"
+        })
+        self._update_xsrf_token()
         resp = self._request(
             "POST",
             "https://www.emailnator.com/message-list", json={"email": email}, timeout=25
@@ -150,6 +172,12 @@ class LegacyEmailnatorClient:
         return resp.json().get("messageData", [])
 
     def get_message_content(self, email, message_id):
+        # Set referer to mailbox as seen in HAR
+        self.session.headers.update({
+            "Referer": "https://www.emailnator.com/mailbox/",
+            "Origin": "https://www.emailnator.com"
+        })
+        self._update_xsrf_token()
         resp = self._request(
             "POST",
             "https://www.emailnator.com/message-list",
@@ -170,9 +198,11 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
 
     def init_session(self):
         self._bootstrap_via_cloudflare_bypass()
-        xsrf_token = self.session.cookies.get("XSRF-TOKEN")
-        if xsrf_token:
-            self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
+        self._update_xsrf_token()
+        # Ensure session is active for mailboxes
+        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
+        self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
+        self._update_xsrf_token()
 
     def _bootstrap_via_cloudflare_bypass(self):
         last_error = None
