@@ -704,14 +704,14 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
         )
         
         try:
-            await db.add_account(user_id, country_code, email, password, invite_code)
+            account_id = await db.add_account(user_id, country_code, email, password, invite_code)
             walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
             
             qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
                  InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
-                [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{country_code}_{email}_{returned_invite_code}")]
+                [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{account_id}")]
             ])
             
             sent_qr = await cq.message.answer_photo(
