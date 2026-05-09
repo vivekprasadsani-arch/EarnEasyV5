@@ -162,10 +162,9 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                     for email_try in range(MAX_EMAIL_CANDIDATES_PER_ATTEMPT):
                         _close_quietly(email_client)
                         email_client = EmailnatorClient(proxy_url=proxy, allow_proxy_fallback=True)
-                        email = email_client.generate_email()
+                        email = email_client.generate_email(site_id=site_id)
                         if not email:
                             raise RuntimeError("Failed to generate email")
-
                         current_step = "otp send"
                         otp_resp = earn_client.send_otp(email)
                         if otp_resp.get("code") == 200:

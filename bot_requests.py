@@ -437,20 +437,41 @@ class GmailIMAPClient:
         self.allow_proxy_fallback = allow_proxy_fallback
         self.active_alias = None
 
-    def generate_email(self):
-        """Generates a unique Dot-Alias that hasn't been used yet."""
+    def generate_email(self, site_id=None):
+        """Generates a unique Dot-Alias that hasn't been used yet for the specific site."""
+        import database as db
         name, domain = self.GMAIL_USER.split('@')
         n = len(name)
         
-        # Logic to generate a random dot variation
-        dots = [random.choice([True, False]) for _ in range(n - 1)]
-        alias_name = name[0]
-        for i, dot in enumerate(dots):
-            if dot:
-                alias_name += '.'
-            alias_name += name[i+1]
+        # Logic to generate a unique alias based on site usage
+        # We'll try up to 200 random combinations to find one that isn't linked in DB yet
+        best_candidate = self.GMAIL_USER
+        for _ in range(200):
+            dots = [random.choice([True, False]) for _ in range(n - 1)]
+            alias_name = name[0]
+            for i, dot in enumerate(dots):
+                if dot:
+                    alias_name += '.'
+                alias_name += name[i+1]
+                
+            candidate = alias_name + '@' + domain
+            best_candidate = candidate
             
-        self.active_alias = alias_name + '@' + domain
+            if not site_id:
+                break
+                
+            # Check if this specific alias is already linked for this site
+            try:
+                # We are in a sync thread (_sync_create), so we can use asyncio.run 
+                # to call the async DB check.
+                is_used = asyncio.run(db.is_email_used_on_site(site_id, candidate))
+                if not is_used:
+                    break
+            except:
+                # If DB check fails, just take the candidate
+                break
+            
+        self.active_alias = best_candidate
         return self.active_alias
 
     def get_messages(self, email_addr):
@@ -559,11 +580,21 @@ class EmailnatorClient:
         self._active_client = client
         self._provider_name = provider_name
 
-    def _attempt_generate(self, provider_name, factory):
+    def _attempt_generate(self, provider_name, factory, site_id=None):
         client = None
         try:
             client = factory()
-            email = client.generate_email()
+            # Pass site_id to generator if supported
+            if hasattr(client, "generate_email"):
+                import inspect
+                sig = inspect.signature(client.generate_email)
+                if "site_id" in sig.parameters:
+                    email = client.generate_email(site_id=site_id)
+                else:
+                    email = client.generate_email()
+            else:
+                email = None
+                
             if not email:
                 raise RuntimeError(f"{provider_name} returned an empty email address")
             self._set_active_client(client, provider_name)
@@ -632,7 +663,7 @@ class EmailnatorClient:
         self._provider_name = previous_provider
         return False
 
-    def generate_email(self):
+    def generate_email(self, site_id=None):
         self.close()
 
         # 1. Try Gmail IMAP first - It is now the primary method as per user request
@@ -642,6 +673,7 @@ class EmailnatorClient:
                 proxy_url=self.proxy_url,
                 allow_proxy_fallback=self.allow_proxy_fallback,
             ),
+            site_id=site_id
         )
         if email:
             return email
@@ -654,6 +686,7 @@ class EmailnatorClient:
                     proxy_url=self.proxy_url,
                     allow_proxy_fallback=self.allow_proxy_fallback,
                 ),
+                site_id=site_id
             )
             if email:
                 return email
@@ -662,6 +695,7 @@ class EmailnatorClient:
         email, bypass_error = self._attempt_generate(
             "bypassed_emailnator",
             self._bypassed_emailnator_client,
+            site_id=site_id
         )
         if email:
             return email
@@ -673,6 +707,7 @@ class EmailnatorClient:
                 proxy_url=self.proxy_url,
                 allow_proxy_fallback=self.allow_proxy_fallback,
             ),
+            site_id=site_id
         )
         if email:
             return email

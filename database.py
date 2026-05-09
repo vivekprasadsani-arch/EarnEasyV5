@@ -249,3 +249,19 @@ async def get_latest_account_by_email(user_id: int, email: str):
         },
         order="created_at.desc",
     )
+
+
+async def is_email_used_on_site(site_id: str, email: str):
+    """Checks if a specific email (alias) has already been successfully linked on a specific site."""
+    def _sync_check():
+        target = _fetch_first(
+            "accounts",
+            columns="id",
+            filters={
+                "site_id": f"eq.{site_id}",
+                "email": f"eq.{email}",
+                "is_linked": "eq.true",
+            }
+        )
+        return target is not None
+    return await asyncio.to_thread(_sync_check)
