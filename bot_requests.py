@@ -277,15 +277,18 @@ class ManualEmailnatorClient(LegacyEmailnatorClient):
     COOKIE_FILE = "manual_emailnator_cookies.json"
 
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
+        self.impersonates = ["chrome110", "chrome101", "safari15_5"]
+        self.current_impersonate_idx = 0
         self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
         
-        # We don't call _init_session_obj because we manually set headers/cookies
+        # We manually set up standard requests session for manual cookies
         self.session = requests.Session()
         self.session.trust_env = False
         if self.proxy_url:
-            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
+            p = normalize_proxy_url(self.proxy_url)
+            self.session.proxies.update({"http": p, "https": p})
         
         self.init_session()
 
@@ -306,19 +309,25 @@ class ManualEmailnatorClient(LegacyEmailnatorClient):
             for name, value in data.get("cookies", {}).items():
                 self.session.cookies.set(name, value, domain="www.emailnator.com")
             
-            # Verify if cookies work by hitting mailbox
-            self._update_xsrf_token()
-            self.session.headers.update({"Referer": "https://www.emailnator.com/"})
-            # Use _request to handle potential proxy issues but we expect 200/403 here
-            resp = self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
-            self._update_xsrf_token()
+            # Verify if cookies work by hitting mailbox - one try only for manual verification
+            try:
+                self._update_xsrf_token()
+                self.session.headers.update({"Referer": "https://www.emailnator.com/"})
+                resp = self.session.get("https://www.emailnator.com/mailbox/", timeout=25, proxies=self.session.proxies)
+                if resp.status_code == 403:
+                    raise RuntimeError("Cloudflare 403 on manual cookies")
+                resp.raise_for_status()
+                self._update_xsrf_token()
+            except Exception as e:
+                logger.warning(f"Verification check failed: {e}")
+                raise
             
             logger.info("Manual cookies loaded and verified successfully")
         except Exception as e:
             logger.warning(f"Failed to load manual cookies: {e}")
-            # If manual cookies fail with 403, we notify admin
+            # If manual cookies fail with 403, we notify admin immediately
             if "403" in str(e) or "forbidden" in str(e).lower():
-                notify_admin("⚠️ Manual Emailnator cookies have expired or been blocked. Please upload new cookies using /updatecookies")
+                notify_admin("⚠️ Manual Emailnator cookies have expired or been blocked. Please capture NEW cookies USING THE PAKISTAN PROXY and upload using /updatecookies")
             raise
 
 
