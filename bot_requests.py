@@ -279,7 +279,8 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
             try:
                 bypasser_cls = _load_camoufox_bypasser()
                 cache_file = str(Path(__file__).resolve().with_name("cf_emailnator_cookie_cache.json"))
-                bypasser = bypasser_cls(max_retries=3, log=False, cache_file=cache_file)
+                # Use higher retries for browser bypass on Render
+                bypasser = bypasser_cls(max_retries=5, log=True, cache_file=cache_file)
                 data = asyncio.run(
                     bypasser.get_or_generate_html(
                         self.EMAILNATOR_URL,
@@ -311,173 +312,6 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
         if last_error:
             raise last_error
         raise RuntimeError("Cloudflare bypass bootstrap failed")
-
-
-class EmailMuxClient:
-    BASE_URL = "https://emailmux.com"
-    API_SECRET = "yjd683c@47"
-    LOCALE = "en"
-
-    def __init__(self, proxy_url=None, allow_proxy_fallback=True):
-        self.session = requests.Session()
-        self.session.trust_env = False
-        self.allow_proxy_fallback = allow_proxy_fallback
-        self.proxy_url = normalize_proxy_url(proxy_url)
-        self.using_proxy = bool(self.proxy_url)
-        self._active_email = ""
-        self._active_email_ts = 0.0
-        if self.proxy_url:
-            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
-        self.session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept": "application/json, text/plain, */*",
-                "Referer": f"{self.BASE_URL}/{self.LOCALE}/temporary-gmail",
-            }
-        )
-
-    @staticmethod
-    def is_proxy_error(ex: Exception) -> bool:
-        if isinstance(ex, requests.exceptions.ProxyError):
-            return True
-        text = str(ex).lower()
-        return any(err in text for err in ("proxy", "407", "remote end closed", "tunnel connection failed"))
-
-    def _disable_proxy(self):
-        self.session.proxies.clear()
-        self.using_proxy = False
-
-    def _request(self, method, url, **kwargs):
-        for attempt in range(3):
-            try:
-                resp = self.session.request(method, url, **kwargs)
-                if resp.status_code == 429 and attempt < 2:
-                    time.sleep(5 + attempt * 5)
-                    continue
-                resp.raise_for_status()
-                return resp
-            except Exception as ex:
-                if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
-                    self._disable_proxy()
-                    return self._request(method, url, **kwargs)
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                raise
-        raise RuntimeError("Max retries exceeded for email client")
-
-    def _signed_headers(self, email: str) -> dict:
-        timestamp = str(int(time.time() * 1000))
-        signature = hashlib.md5(f"{self.API_SECRET}{email}{timestamp}".encode("utf-8")).hexdigest()
-        return {
-            "Content-Type": "application/json",
-            "X-API-Timestamp": timestamp,
-            "X-API-Signature": signature,
-        }
-
-    def _bootstrap_session(self):
-        self._request("GET", f"{self.BASE_URL}/domains", timeout=25)
-
-    def _activate_email(self, email: str):
-        resp = self._request(
-            "GET",
-            f"{self.BASE_URL}/use-email?email={quote(email)}",
-            headers=self._signed_headers(email),
-            timeout=25,
-        )
-        data = resp.json()
-        if data.get("status") != "success":
-            raise RuntimeError(f"EmailMux activation failed: {data.get('msg') or 'unknown error'}")
-        self._active_email = email
-        self._active_email_ts = time.time()
-
-    def _ensure_email_active(self, email: str, *, force: bool = False):
-        same_email = email and email == self._active_email
-        recently_activated = (time.time() - self._active_email_ts) < 20
-        if force or not same_email or not recently_activated:
-            self._activate_email(email)
-
-    @staticmethod
-    def _extract_email_html(page_html: str) -> str:
-        match = re.search(
-            r'<script id="email-html-data" type="application/json">\s*"(.*?)"\s*</script>',
-            page_html,
-            re.S,
-        )
-        if not match:
-            return page_html
-        encoded = f'"{match.group(1)}"'
-        return unescape(json.loads(encoded))
-
-    @staticmethod
-    def _is_deepearn_compatible_email(email: str) -> bool:
-        local_part, _, domain = (email or "").partition("@")
-        return bool(local_part) and domain.lower() == "gmail.com" and "+" not in local_part
-
-    def generate_email(self):
-        self._bootstrap_session()
-        last_error = None
-        for _ in range(8):
-            resp = self._request(
-                "POST",
-                f"{self.BASE_URL}/generate-email",
-                json={"domains": ["gmail"]},
-                timeout=25,
-            )
-            data = resp.json()
-            if data.get("status") != "success":
-                raise RuntimeError(f"EmailMux generation failed: {data.get('msg') or 'unknown error'}")
-            email = (data.get("email") or "").strip()
-            if not email:
-                last_error = RuntimeError("EmailMux returned an empty email address")
-                continue
-            self._ensure_email_active(email, force=True)
-            if self._is_deepearn_compatible_email(email):
-                return email
-            last_error = RuntimeError(f"EmailMux generated unsupported alias: {email}")
-
-        if last_error:
-            raise last_error
-        raise RuntimeError("EmailMux could not generate a supported gmail address")
-
-    def get_messages(self, email):
-        self._ensure_email_active(email)
-        resp = self._request(
-            "GET",
-            f"{self.BASE_URL}/emails?email={quote(email)}",
-            headers=self._signed_headers(email),
-            timeout=25,
-        )
-        data = resp.json()
-        if not isinstance(data, list):
-            return []
-        normalized = []
-        for item in data:
-            if isinstance(item, dict):
-                clone = dict(item)
-                if clone.get("uuid") and not clone.get("messageID"):
-                    clone["messageID"] = clone["uuid"]
-                normalized.append(clone)
-        return normalized
-
-    def get_message_content(self, email, message_id):
-        self._ensure_email_active(email)
-        resp = self._request(
-            "GET",
-            f"{self.BASE_URL}/{self.LOCALE}/email/{message_id}",
-            headers=self._signed_headers(email),
-            timeout=25,
-        )
-        return self._extract_email_html(resp.text)
-
-    def close(self):
-        try:
-            self.session.close()
-        except Exception:
-            pass
 
 
 class EmailnatorClient:
@@ -524,9 +358,6 @@ class EmailnatorClient:
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
 
-    def _fallback_client(self):
-        return EmailMuxClient(proxy_url=self.proxy_url, allow_proxy_fallback=self.allow_proxy_fallback)
-
     @staticmethod
     def _is_forbidden_error(ex: Exception) -> bool:
         if isinstance(ex, requests.exceptions.HTTPError):
@@ -542,11 +373,10 @@ class EmailnatorClient:
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
         
-        # Always prioritize bypass as it's the only 100% reliable method against Cloudflare
+        # Strictly Emailnator only. NO EmailMux fallback allowed.
         return [
             ("bypassed_emailnator", self._bypassed_emailnator_client),
-            ("legacy_emailnator", legacy_factory),
-            ("emailmux_fallback", self._fallback_client) # Keep as final emergency
+            ("legacy_emailnator", legacy_factory)
         ]
 
     def _recover_inbox_client(self, email: str) -> bool:
@@ -596,13 +426,8 @@ class EmailnatorClient:
         if email:
             return email
         
-        # 3. Last resort - EmailMux
-        email, mux_error = self._attempt_generate("emailmux_fallback", self._fallback_client)
-        if email:
-            return email
-
-        # If everything failed
-        raise RuntimeError(f"All email sources failed. Bypass: {bypass_error}; Legacy: {legacy_error}; Mux: {mux_error}")
+        # Strictly Emailnator only. NO EmailMux fallback.
+        raise RuntimeError(f"Emailnator failed. Bypass: {bypass_error}; Legacy: {legacy_error}")
 
     def get_messages(self, email):
         if not self._active_client:
@@ -722,7 +547,7 @@ class DeepEarnClient:
                     msg = str(res_json.get("msg") or "").lower()
                     if "frequent" in msg and attempt < 2:
                         logger.warning(f"Business rate limit hit: {msg}. Sleeping longer...")
-                        time.sleep(15 + attempt * 10)
+                        time.sleep(20 + attempt * 10) # Increased sleep
                         continue
                     return res_json
                 except ValueError:
@@ -735,7 +560,7 @@ class DeepEarnClient:
                     # Re-try immediately once without proxy
                     return self._post(path, data)
                 if attempt < 2:
-                    time.sleep(random.uniform(2, 5))
+                    time.sleep(random.uniform(5, 10))
                     continue
                 raise last_error
         if last_error:
