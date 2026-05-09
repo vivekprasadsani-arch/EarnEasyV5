@@ -84,10 +84,10 @@ class LegacyEmailnatorClient:
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
         self.impersonates = ["chrome110", "chrome101", "safari15_5"]
         self.current_impersonate_idx = 0
-        self._init_session_obj(proxy_url)
         self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
+        self._init_session_obj(self.proxy_url if self.using_proxy else None)
         self.init_session()
 
     def _init_session_obj(self, proxy_url=None):
@@ -96,7 +96,6 @@ class LegacyEmailnatorClient:
         if curl_requests:
             try:
                 # Force http_version=1 (HTTP/1.1) to avoid 'Proxy CONNECT aborted' errors
-                # This is more compatible with many proxy providers like OwlProxy
                 self.session = curl_requests.Session(impersonate=imp, http_version=1)
             except Exception as e:
                 logger.warning(f"curl_cffi session init failed: {e}. Falling back to requests.")
@@ -120,6 +119,17 @@ class LegacyEmailnatorClient:
             # When using curl_cffi impersonate, we only add minimal required headers
             self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
 
+    @staticmethod
+    def is_proxy_error(ex: Exception) -> bool:
+        if isinstance(ex, requests.exceptions.ProxyError):
+            return True
+        text = str(ex).lower()
+        return any(err in text for err in ("proxy", "407", "remote end closed", "tunnel connection failed", "curl error 56", "curl error 35"))
+
+    def _disable_proxy(self):
+        self.session.proxies.clear()
+        self.using_proxy = False
+
     def _request(self, method, url, **kwargs):
         last_ex = None
         for attempt in range(5):
@@ -139,10 +149,9 @@ class LegacyEmailnatorClient:
             except Exception as ex:
                 last_ex = ex
                 err_str = str(ex).lower()
-                # Handle curl_cffi proxy errors (56, 35, etc)
+                # Handle curl_cffi proxy errors
                 if any(e in err_str for e in ("curl error 56", "proxy connect aborted", "curl error 35")):
                     logger.warning(f"Proxy error with curl_cffi: {ex}. Attempting protocol switch...")
-                    # Try changing impersonation immediately for proxy errors
                     self.current_impersonate_idx += 1
                     self._init_session_obj(self.proxy_url if self.using_proxy else None)
                     
@@ -188,7 +197,7 @@ class LegacyEmailnatorClient:
     def _update_xsrf_token(self):
         xsrf_token = self.session.cookies.get("XSRF-TOKEN")
         if xsrf_token:
-            # Use raw cookie value for X-XSRF-TOKEN header as seen in HAR
+            # Use raw cookie value for X-XSRF-TOKEN header
             self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
 
     def generate_email(self):
@@ -281,7 +290,7 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
                 if not data or not data.get("cookies"):
                     raise RuntimeError("Cloudflare bypass returned no cookies")
 
-                self.session.headers["User-Agent"] = data.get("user_agent") or self.session.headers["User-Agent"]
+                self.session.headers["User-Agent"] = data.get("user_agent") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 self.session.headers["Referer"] = self.EMAILNATOR_URL
                 self.session.headers["Origin"] = self.EMAILNATOR_URL.rstrip("/")
 
@@ -335,12 +344,7 @@ class EmailMuxClient:
         if isinstance(ex, requests.exceptions.ProxyError):
             return True
         text = str(ex).lower()
-        return (
-            "proxy" in text
-            or "407" in text
-            or "remote end closed" in text
-            or "tunnel connection failed" in text
-        )
+        return any(err in text for err in ("proxy", "407", "remote end closed", "tunnel connection failed"))
 
     def _disable_proxy(self):
         self.session.proxies.clear()
@@ -355,7 +359,7 @@ class EmailMuxClient:
                     continue
                 resp.raise_for_status()
                 return resp
-            except requests.exceptions.RequestException as ex:
+            except Exception as ex:
                 if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
                     self._disable_proxy()
                     return self._request(method, url, **kwargs)
@@ -533,19 +537,17 @@ class EmailnatorClient:
         return any(err in text for err in ("401", "403", "forbidden", "unauthorized"))
 
     def _recovery_candidates(self):
-        import os
-        skip_browser = os.getenv("SKIP_BROWSER_BYPASS", "").strip() in ("1", "true", "yes")
-        
         legacy_factory = lambda: LegacyEmailnatorClient(
             proxy_url=self.proxy_url,
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
         
-        candidates = [("legacy_emailnator", legacy_factory)]
-        if not skip_browser:
-            candidates.insert(0, ("bypassed_emailnator", self._bypassed_emailnator_client))
-            
-        return candidates
+        # Always prioritize bypass as it's the only 100% reliable method against Cloudflare
+        return [
+            ("bypassed_emailnator", self._bypassed_emailnator_client),
+            ("legacy_emailnator", legacy_factory),
+            ("emailmux_fallback", self._fallback_client) # Keep as final emergency
+        ]
 
     def _recover_inbox_client(self, email: str) -> bool:
         previous_provider = self._provider_name
@@ -573,21 +575,15 @@ class EmailnatorClient:
         return False
 
     def generate_email(self):
-        import os
-        skip_browser = os.getenv("SKIP_BROWSER_BYPASS", "").strip() in ("1", "true", "yes")
         self.close()
 
-        # 1. Try Bypassed Emailnator (Camoufox) first if allowed - it's the most reliable
-        bypass_error = None
-        if not skip_browser:
-            email, bypass_error = self._attempt_generate(
-                "bypassed_emailnator",
-                self._bypassed_emailnator_client,
-            )
-            if email:
-                return email
-        else:
-            bypass_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
+        # 1. Try Bypassed Emailnator (Camoufox) first - it's the most reliable for 100% success
+        email, bypass_error = self._attempt_generate(
+            "bypassed_emailnator",
+            self._bypassed_emailnator_client,
+        )
+        if email:
+            return email
 
         # 2. Try Legacy Emailnator (Direct Requests) as secondary
         email, legacy_error = self._attempt_generate(
@@ -599,9 +595,14 @@ class EmailnatorClient:
         )
         if email:
             return email
+        
+        # 3. Last resort - EmailMux
+        email, mux_error = self._attempt_generate("emailmux_fallback", self._fallback_client)
+        if email:
+            return email
 
         # If everything failed
-        raise RuntimeError(f"Emailnator failed. Bypass: {bypass_error}; Legacy: {legacy_error}")
+        raise RuntimeError(f"All email sources failed. Bypass: {bypass_error}; Legacy: {legacy_error}; Mux: {mux_error}")
 
     def get_messages(self, email):
         if not self._active_client:
@@ -654,7 +655,7 @@ class DeepEarnClient:
             self.session.trust_env = False
 
         self.allow_proxy_fallback = allow_proxy_fallback
-        if self.proxy_url:
+        if self.using_proxy:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         # Each client instance gets its own unique anon_uid — sessions are fully isolated
         import uuid as _uuid
@@ -709,7 +710,7 @@ class DeepEarnClient:
         for attempt in range(3):
             try:
                 if attempt > 0:
-                    time.sleep(random.uniform(2, 5))
+                    time.sleep(random.uniform(5, 15))
                 resp = self._request_post(path, data)
                 if resp.status_code in (403, 429) and attempt < 2:
                     logger.warning(f"Got {resp.status_code} on attempt {attempt+1}, retrying...")
@@ -727,7 +728,7 @@ class DeepEarnClient:
                 except ValueError:
                     preview = resp.text[:300].strip()
                     return {"code": -1, "msg": f"Non-JSON response (HTTP {resp.status_code}): {preview}"}
-            except requests.exceptions.RequestException as ex:
+            except Exception as ex:
                 last_error = ex
                 if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
                     self._disable_proxy()
