@@ -110,6 +110,7 @@ class CamoufoxBypasser:
                 block_images=False,
                 block_webrtc=True,
                 enable_cache=False,
+                allow_update=False, # DISBALE GITHUB CHECK TO PREVENT RATE LIMIT CRASH
             )
             browser = await camoufox.__aenter__()
 
