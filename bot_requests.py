@@ -321,13 +321,28 @@ class ManualEmailnatorClient(LegacyEmailnatorClient):
             with open(self.COOKIE_FILE, "r") as f:
                 data = json.load(f)
             
+            # 1. Handle User-Agent
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            if isinstance(data, dict):
+                user_agent = data.get("user_agent", user_agent)
+            
             self.session.headers.update({
-                "User-Agent": data.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+                "User-Agent": user_agent,
                 "X-Requested-With": "XMLHttpRequest"
             })
             
-            # Load cookies into session
-            for name, value in data.get("cookies", {}).items():
+            # 2. Handle Cookies (Dict or List format)
+            cookie_dict = {}
+            if isinstance(data, list):
+                # Standard browser export format: [{"name": "...", "value": "..."}, ...]
+                for c in data:
+                    if isinstance(c, dict) and 'name' in c and 'value' in c:
+                        cookie_dict[c['name']] = c['value']
+            elif isinstance(data, dict):
+                # Our custom format or other dict-based
+                cookie_dict = data.get("cookies", data) # Use 'cookies' key or the dict itself
+
+            for name, value in cookie_dict.items():
                 self.session.cookies.set(name, value, domain="www.emailnator.com")
             
             # Verify if cookies work by hitting mailbox - one try only for manual verification
