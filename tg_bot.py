@@ -408,7 +408,12 @@ async def process_invite(message: Message, state: FSMContext):
     country_code = data.get("country_code")
     method = data.get("method")
     
-    await state.clear() # Clear state so user can interact while tasks run
+    # Update state with the LAST invite code for 'Next' button persistence
+    if invite_codes:
+        await state.update_data(invite_code=invite_codes[-1])
+    
+    # Don't clear fully, just set state to None so user can send other commands
+    await state.set_state(None) 
 
     if len(invite_codes) > 1:
         await message.answer(f"⏳ Detected {len(invite_codes)} invite codes. Processing them sequentially to ensure 100% success...")
@@ -446,6 +451,9 @@ async def generate_and_send_qr(message: Message, country_code: str, method: str,
         # Create DeepEarn / Emailnator Account - This is internally serialized by REGISTRATION_LOCK
         email = await backend.create_account(country_code, invite_code, proxy, password)
         await db.add_account(user_id, country_code, email, password, invite_code)
+        
+        # Save email in state for SAS method reuse
+        await state.update_data(current_email=email)
         
         if is_photo:
             await status_msg.edit_caption(caption=f"🔄 Account created `({email})`! Generating QR...", parse_mode="Markdown")
