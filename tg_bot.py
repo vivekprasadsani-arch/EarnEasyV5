@@ -41,6 +41,8 @@ class BotStates(StatesGroup):
     waiting_for_proxy = State()
     waiting_for_password = State()
     waiting_for_cookies = State()
+    waiting_for_manual_email = State()
+    waiting_for_manual_otp = State()
 
 COUNTRIES = {
     "india": "🇮🇳 India",
@@ -452,52 +454,92 @@ async def select_method(cq: CallbackQuery, state: FSMContext):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="SAS Method (Single Account)", callback_data="method_sas")],
-        [InlineKeyboardButton(text="MAR Method (Rotation)", callback_data="method_mar")]
+        [InlineKeyboardButton(text="MAR Method (Rotation)", callback_data="method_mar")],
+        [InlineKeyboardButton(text="📧 Use Personal Email (Manual OTP)", callback_data="method_manual")]
     ])
     await cq.message.edit_text(f"Region selected: {COUNTRIES[country_code]}\n\nPlease select the registration method:", reply_markup=kb)
     await safe_answer_callback(cq)
 
 @router.callback_query(F.data.startswith("method_"))
 async def ask_invite_code(cq: CallbackQuery, state: FSMContext):
-    method = cq.data.split("_")[1] # sas or mar
+    method = cq.data.split("_")[1] # sas, mar, or manual
     await state.update_data(method=method)
-    data = await state.get_data()
     
-    if method == "mar":
-        # MAR method uses the SAME invite code if the user already provided one recently or we can ask for a new one.
-        # But we prompt.
-        pass
+    if method == "manual":
+        await cq.message.answer("📧 Please enter the **Email Address** you want to use:", parse_mode="Markdown", reply_markup=ForceReply())
+        await state.set_state(BotStates.waiting_for_manual_email)
+    else:
+        await cq.message.answer("📝 Please enter your Invite Code:", reply_markup=ForceReply())
+        await state.set_state(BotStates.waiting_for_invite)
         
-    msg = await cq.message.answer("📝 Please enter your Invite Code:", reply_markup=ForceReply())
-    await state.update_data(prompt_msg_id=msg.message_id) # Save for cleanup later
-    await state.set_state(BotStates.waiting_for_invite)
     await cq.message.delete()
     await safe_answer_callback(cq)
+
+@router.message(BotStates.waiting_for_manual_email)
+async def process_manual_email(message: Message, state: FSMContext):
+    email = message.text.strip().lower()
+    if not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email):
+        await message.answer("❌ Invalid email format. Please send a valid email address:")
+        return
+    
+    await state.update_data(manual_email=email)
+    await message.answer("📝 Now please enter your **Invite Code**:", parse_mode="Markdown", reply_markup=ForceReply())
+    await state.set_state(BotStates.waiting_for_invite)
 
 @router.message(BotStates.waiting_for_invite)
 async def process_invite(message: Message, state: FSMContext):
     text = message.text.strip()
-    # Support multiple invite codes separated by spaces, commas or newlines
-    invite_codes = re.findall(r'\d{7,12}', text)
+    data = await state.get_data()
+    method = data.get("method")
     
+    if method == "manual":
+        # For manual mode, we only take ONE code at a time to stay simple
+        invite_code = text
+        email = data.get("manual_email")
+        country_code = data.get("country_code")
+        
+        await state.set_state(BotStates.waiting_for_manual_otp)
+        await state.update_data(invite_code=invite_code)
+        
+        status_msg = await message.answer(f"⏳ Sending OTP to `{email}`... Please wait.", parse_mode="Markdown")
+        
+        user_data = await db.get_user(message.from_user.id)
+        proxy = user_data['proxy']
+        
+        try:
+            # We need a new backend function or direct call to send OTP
+            from bot_requests import DeepEarnClient
+            domain = backend.SITES.get(country_code)
+            client = DeepEarnClient(inviter_code=invite_code, proxy_url=proxy, domain=domain)
+            res = await asyncio.to_thread(client.send_otp, email)
+            
+            if res.get("code") == 200:
+                await safe_edit_message(status_msg, f"✅ OTP Sent! Please check your email `{email}` and send the **6-digit code** here:", parse_mode="Markdown")
+                # Store client/data for the next step
+                await state.update_data(temp_email=email, temp_invite=invite_code)
+            else:
+                await safe_edit_message(status_msg, f"❌ Failed to send OTP: {res.get('msg')}")
+                await state.clear()
+        except Exception as e:
+            await safe_edit_message(status_msg, f"❌ Error: {str(e)}")
+            await state.clear()
+        return
+
+    # Existing MAR/SAS logic...
+    invite_codes = re.findall(r'\d{7,12}', text)
     if not invite_codes:
-        # Fallback for single non-digit-only input if needed
         invite_codes = [text]
 
-    data = await state.get_data()
     country_code = data.get("country_code")
-    method = data.get("method")
     
     if not country_code or not method:
         await message.answer("❌ Error: Region or Method lost. Please start over using 'Add WhatsApp'.")
         await state.clear()
         return
 
-    # Update state with the LAST invite code for 'Next' button persistence
     if invite_codes:
         await state.update_data(invite_code=invite_codes[-1])
     
-    # Set state to None so user can interact while tasks run
     await state.set_state(None) 
 
     if len(invite_codes) > 1:
@@ -514,6 +556,67 @@ async def process_invite(message: Message, state: FSMContext):
                 user_id=message.from_user.id
             )
         )
+
+@router.message(BotStates.waiting_for_manual_otp)
+async def process_manual_otp(message: Message, state: FSMContext):
+    otp = message.text.strip()
+    if not re.match(r"^\d{6}$", otp):
+        await message.answer("❌ Invalid OTP. Please send a **6-digit number**:")
+        return
+    
+    data = await state.get_data()
+    email = data.get("temp_email")
+    invite_code = data.get("temp_invite")
+    country_code = data.get("country_code")
+    user_id = message.from_user.id
+    
+    status_msg = await message.answer(f"🔄 Registering `{email}`... Please wait.", parse_mode="Markdown")
+    
+    user_data = await db.get_user(user_id)
+    proxy = user_data['proxy']
+    password = user_data['custom_password'] or config.DEFAULT_PASSWORD
+    
+    try:
+        from bot_requests import DeepEarnClient
+        domain = backend.SITES.get(country_code)
+        earn_client = DeepEarnClient(inviter_code=invite_code, proxy_url=proxy, domain=domain)
+        
+        # Register
+        reg_resp = await asyncio.to_thread(earn_client.register, email, password, otp)
+        if reg_resp.get("code") != 200:
+            await safe_edit_message(status_msg, f"❌ Registration failed: {reg_resp.get('msg')}")
+            await state.clear()
+            return
+            
+        await db.add_account(user_id, country_code, email, password, invite_code)
+        await safe_edit_message(status_msg, f"✅ Account registered! Generating WhatsApp QR...", parse_mode="Markdown")
+        
+        # Generator QR
+        walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
+        
+        # Send QR code
+        qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
+             InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
+            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{country_code}_{email}_{returned_invite_code}")]
+        ])
+        
+        sent_qr = await message.answer_photo(
+            photo=qr_file,
+            caption=f"📱 **QR Code Ready (Manual Email)**\n\n**Email**: `{email}`\n**Invite Code**: `{returned_invite_code}`\n\nScan this QR with WhatsApp natively.",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+        await safe_delete_message(status_msg)
+        
+        # Start Polling
+        asyncio.create_task(poll_for_success(sent_qr, state, walink_client, device_id, returned_invite_code, email, "manual", country_code))
+        await state.set_state(None)
+        
+    except Exception as e:
+        await safe_edit_message(status_msg, f"❌ Error: {str(e)}")
+        await state.clear()
 
 
 async def generate_and_send_qr(message: Message, state: FSMContext, country_code: str, method: str, invite_code: str, user_id: int, message_to_edit: Message = None):
