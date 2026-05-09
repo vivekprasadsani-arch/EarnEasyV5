@@ -12,6 +12,10 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import requests
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:
+    curl_requests = None
 
 logger = logging.getLogger(__name__)
 
@@ -69,26 +73,35 @@ def _load_camoufox_bypasser():
 
 class LegacyEmailnatorClient:
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
-        self.session = requests.Session()
-        self.session.trust_env = False
+        if curl_requests:
+            self.session = curl_requests.Session(impersonate="chrome124")
+        else:
+            self.session = requests.Session()
+            self.session.trust_env = False
+
         self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
         if self.proxy_url:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
-        self.session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept": "application/json, text/plain, */*",
-                "X-Requested-With": "XMLHttpRequest",
-                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-            }
-        )
+            
+        if not curl_requests:
+            self.session.headers.update(
+                {
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "application/json, text/plain, */*",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                }
+            )
+        else:
+            self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
+            
         self.init_session()
 
     @staticmethod
@@ -96,12 +109,7 @@ class LegacyEmailnatorClient:
         if isinstance(ex, requests.exceptions.ProxyError):
             return True
         text = str(ex).lower()
-        return (
-            "proxy" in text
-            or "407" in text
-            or "remote end closed" in text
-            or "tunnel connection failed" in text
-        )
+        return any(err in text for err in ("proxy", "407", "remote end closed", "tunnel connection failed", "curl error 56", "curl error 35"))
 
     def _disable_proxy(self):
         self.session.proxies.clear()
@@ -595,8 +603,13 @@ class DeepEarnClient:
         self.domain = domain
         self.base_url = f"https://{domain}"
         self.currency = DOMAIN_CURRENCY_MAP.get((domain or "").strip().lower(), "India")
-        self.session = requests.Session()
-        self.session.trust_env = False
+        
+        if curl_requests:
+            self.session = curl_requests.Session(impersonate="chrome124")
+        else:
+            self.session = requests.Session()
+            self.session.trust_env = False
+
         self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
