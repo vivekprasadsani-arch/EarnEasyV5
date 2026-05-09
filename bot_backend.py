@@ -247,6 +247,8 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                         )
 
                     current_step = "registration"
+                    # Small sleep to ensure backend is ready for the code
+                    time.sleep(2)
                     reg_resp = earn_client.register(email, password, otp)
                     if reg_resp.get("code") != 200:
                         raise RuntimeError(f"Registration failed: {reg_resp.get('msg')}")

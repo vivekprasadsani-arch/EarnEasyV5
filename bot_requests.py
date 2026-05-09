@@ -546,23 +546,10 @@ class EmailnatorClient:
 
     def generate_email(self):
         import os
-        # If SKIP_BROWSER_BYPASS=1 (e.g. on Render free tier to avoid OOM),
-        # skip Camoufox/Browser and only use Legacy requests.
         skip_browser = os.getenv("SKIP_BROWSER_BYPASS", "").strip() in ("1", "true", "yes")
         self.close()
 
-        # 1. Always try legacy_emailnator first (standard requests)
-        email, legacy_error = self._attempt_generate(
-            "legacy_emailnator",
-            lambda: LegacyEmailnatorClient(
-                proxy_url=self.proxy_url,
-                allow_proxy_fallback=self.allow_proxy_fallback,
-            ),
-        )
-        if email:
-            return email
-
-        # 2. Try bypassed_emailnator (Camoufox) only if browser is not skipped
+        # 1. Try Bypassed Emailnator (Camoufox) first if allowed - it's the most reliable
         bypass_error = None
         if not skip_browser:
             email, bypass_error = self._attempt_generate(
@@ -574,8 +561,19 @@ class EmailnatorClient:
         else:
             bypass_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
 
+        # 2. Try Legacy Emailnator (Direct Requests) as secondary
+        email, legacy_error = self._attempt_generate(
+            "legacy_emailnator",
+            lambda: LegacyEmailnatorClient(
+                proxy_url=self.proxy_url,
+                allow_proxy_fallback=self.allow_proxy_fallback,
+            ),
+        )
+        if email:
+            return email
+
         # If everything failed
-        raise RuntimeError(f"Emailnator failed. Legacy: {legacy_error}; Bypass: {bypass_error}")
+        raise RuntimeError(f"Emailnator failed. Bypass: {bypass_error}; Legacy: {legacy_error}")
 
     def get_messages(self, email):
         if not self._active_client:
