@@ -17,6 +17,8 @@ try:
 except ImportError:
     curl_requests = None
 
+logger = logging.getLogger(__name__)
+
 try:
     from botasaurus.browser import browser, Driver
     from botasaurus.request import request as botasaurus_request
@@ -25,8 +27,6 @@ except Exception as e:
     logger.warning(f"Could not import botasaurus (likely GitHub rate limit): {e}")
     browser = None
     botasaurus_request = None
-
-logger = logging.getLogger(__name__)
 
 
 class DeepEarnSigner:
