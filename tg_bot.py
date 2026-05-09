@@ -408,11 +408,16 @@ async def process_invite(message: Message, state: FSMContext):
     country_code = data.get("country_code")
     method = data.get("method")
     
+    if not country_code or not method:
+        await message.answer("❌ Error: Region or Method lost. Please start over using 'Add WhatsApp'.")
+        await state.clear()
+        return
+
     # Update state with the LAST invite code for 'Next' button persistence
     if invite_codes:
         await state.update_data(invite_code=invite_codes[-1])
     
-    # Don't clear fully, just set state to None so user can send other commands
+    # Set state to None so user can interact while tasks run
     await state.set_state(None) 
 
     if len(invite_codes) > 1:
@@ -422,6 +427,7 @@ async def process_invite(message: Message, state: FSMContext):
         asyncio.create_task(
             generate_and_send_qr(
                 message, 
+                state=state,
                 country_code=country_code, 
                 method=method, 
                 invite_code=code, 
@@ -430,14 +436,14 @@ async def process_invite(message: Message, state: FSMContext):
         )
 
 
-async def generate_and_send_qr(message: Message, country_code: str, method: str, invite_code: str, user_id: int, message_to_edit: Message = None):
+async def generate_and_send_qr(message: Message, state: FSMContext, country_code: str, method: str, invite_code: str, user_id: int, message_to_edit: Message = None):
     if message_to_edit:
         try:
             await message_to_edit.delete()
-            status_msg = await message.answer(f"🔄 [Queue] Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
+            status_msg = await message.answer(f"🔄 Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
             is_photo = False
         except:
-            status_msg = await message.answer(f"🔄 [Queue] Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
+            status_msg = await message.answer(f"🔄 Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
             is_photo = False
     else:
         status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}...")
@@ -453,7 +459,8 @@ async def generate_and_send_qr(message: Message, country_code: str, method: str,
         await db.add_account(user_id, country_code, email, password, invite_code)
         
         # Save email in state for SAS method reuse
-        await state.update_data(current_email=email)
+        if state:
+            await state.update_data(current_email=email)
         
         if is_photo:
             await status_msg.edit_caption(caption=f"🔄 Account created `({email})`! Generating QR...", parse_mode="Markdown")
@@ -484,7 +491,7 @@ async def generate_and_send_qr(message: Message, country_code: str, method: str,
         await safe_delete_message(status_msg)
         
         # Start Polling
-        asyncio.create_task(poll_for_success(sent_qr, None, walink_client, device_id, returned_invite_code, email, method, country_code))
+        asyncio.create_task(poll_for_success(sent_qr, state, walink_client, device_id, returned_invite_code, email, method, country_code))
         
     except Exception as e:
         logger.error(f"Error generating QR: {e}")
@@ -608,7 +615,15 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
             await state.set_state(BotStates.waiting_for_invite)
             return
             
-        await generate_and_send_qr(cq.message, state, cq.from_user.id, message_to_edit=cq.message) 
+        await generate_and_send_qr(
+            cq.message, 
+            state=state, 
+            country_code=country_code, 
+            method=method, 
+            invite_code=invite_code, 
+            user_id=cq.from_user.id, 
+            message_to_edit=cq.message
+        ) 
         
     elif method == "sas":
         # SAS: Same Account, New WhatsApp Link (re-uses existing email)
@@ -699,44 +714,15 @@ async def handle_pasted_email(message: Message, state: FSMContext):
         current_email=email
     )
     
-    user_id = message.from_user.id
-    user_data = await db.get_user(user_id)
-    proxy = user_data['proxy']
-    password = user_data['custom_password'] or config.DEFAULT_PASSWORD
-    
-    status_msg = await message.answer(
-        f"🔄 Preparing next link for `{email}` ({COUNTRIES.get(country_code, country_code)})...",
-        parse_mode="Markdown",
+    # Resume SAS flow using common function
+    await generate_and_send_qr(
+        message, 
+        state=state, 
+        country_code=country_code, 
+        method="sas", 
+        invite_code=invite_code, 
+        user_id=message.from_user.id
     )
-    
-    try:
-        await db.add_account(user_id, country_code, email, password, invite_code)
-        walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
-        
-        qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
-             InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
-            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{country_code}_{email}_{returned_invite_code}")]
-        ])
-        
-        sent_qr = await message.answer_photo(
-            photo=qr_file,
-            caption=f"📱 **QR Code Ready (Account Resumed)**\n\n**Email**: `{email}`\n**Invite Code**: `{returned_invite_code}`\n\nScan this QR with WhatsApp natively.",
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-        await safe_delete_message(status_msg)
-        
-        asyncio.create_task(poll_for_success(sent_qr, state, walink_client, device_id, returned_invite_code, email, "sas", country_code))
-        
-    except Exception as e:
-        logger.error(f"Error resuming account QR: {e}")
-        await safe_edit_message(
-            status_msg,
-            f"❌ Error during account resume.\n\n`{str(e)}`",
-            parse_mode="Markdown",
-        )
 
 async def main():
     await db.init_db()
