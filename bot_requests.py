@@ -20,7 +20,9 @@ except ImportError:
 try:
     from botasaurus.browser import browser, Driver
     from botasaurus.request import request as botasaurus_request
-except ImportError:
+except Exception as e:
+    # Botasaurus can fail during import if it tries to download binaries and hits GitHub rate limits
+    logger.warning(f"Could not import botasaurus (likely GitHub rate limit): {e}")
     browser = None
     botasaurus_request = None
 
