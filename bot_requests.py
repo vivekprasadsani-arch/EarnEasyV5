@@ -7,6 +7,9 @@ import re
 import string
 import sys
 import time
+import imaplib
+import email
+from email.header import decode_header
 from html import unescape
 import logging
 from pathlib import Path
@@ -74,19 +77,18 @@ def notify_admin(message):
             if asyncio.iscoroutinefunction(cb):
                 # worker threads don't have their own event loop, so we find the main one
                 try:
-                    # In a typical script, the main loop is in the main thread
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         loop.call_soon_threadsafe(asyncio.create_task, cb(message))
                     else:
                         logger.error(f"Cannot notify admin: Loop not running. Msg: {message}")
                 except RuntimeError:
-                    # No loop in this thread, could try run_coroutine_threadsafe if we had a loop handle
                     logger.error(f"Cannot notify admin: No loop in thread. Msg: {message}")
             else:
                 cb(message)
         except Exception as e:
             logger.error(f"Error in notification callback: {e}")
+
 
 def _load_camoufox_bypasser():
     global _CF_BYPASSER_CLASS
@@ -94,7 +96,6 @@ def _load_camoufox_bypasser():
         return _CF_BYPASSER_CLASS
 
     # Disable Camoufox update checks BEFORE importing to prevent GitHub API rate limit crashes
-    import os
     os.environ["CAMOUFOX_ALLOW_UPDATE"] = "0"
 
     repo_dir = Path(__file__).resolve().parent / "CloudflareBypassForScraping-main"
@@ -339,13 +340,12 @@ class ManualEmailnatorClient(LegacyEmailnatorClient):
                     if isinstance(c, dict) and 'name' in c and 'value' in c:
                         cookie_dict[c['name']] = c['value']
             elif isinstance(data, dict):
-                # Our custom format or other dict-based
-                cookie_dict = data.get("cookies", data) # Use 'cookies' key or the dict itself
+                cookie_dict = data.get("cookies", data)
 
             for name, value in cookie_dict.items():
                 self.session.cookies.set(name, value, domain="www.emailnator.com")
             
-            # Verify if cookies work by hitting mailbox - one try only for manual verification
+            # Verify if cookies work by hitting mailbox
             try:
                 self._update_xsrf_token()
                 self.session.headers.update({"Referer": "https://www.emailnator.com/"})
@@ -361,9 +361,8 @@ class ManualEmailnatorClient(LegacyEmailnatorClient):
             logger.info("Manual cookies loaded and verified successfully")
         except Exception as e:
             logger.warning(f"Failed to load manual cookies: {e}")
-            # If manual cookies fail with 403, we notify admin immediately
             if "403" in str(e) or "forbidden" in str(e).lower():
-                notify_admin("⚠️ Manual Emailnator cookies have expired or been blocked. Please capture NEW cookies USING THE PAKISTAN PROXY and upload using /updatecookies")
+                notify_admin("âš ï¸ Manual Emailnator cookies have expired or been blocked. Please capture NEW cookies USING THE PAKISTAN PROXY and upload using /updatecookies")
             raise
 
 
@@ -426,6 +425,115 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
         raise RuntimeError("Cloudflare bypass bootstrap failed")
 
 
+class GmailIMAPClient:
+    """Client that uses personal Gmail via IMAP for 100% success and Dot-Trick support."""
+    
+    # HARDCODED PRIMARY GMAIL - You can move this to config.py if needed
+    GMAIL_USER = "gulzarprasaddhar@gmail.com"
+    GMAIL_PASS = "aruvfhldkvynituj"
+
+    def __init__(self, proxy_url=None, allow_proxy_fallback=True):
+        self.proxy_url = proxy_url
+        self.allow_proxy_fallback = allow_proxy_fallback
+        self.active_alias = None
+
+    def generate_email(self):
+        """Generates a unique Dot-Alias that hasn't been used yet."""
+        name, domain = self.GMAIL_USER.split('@')
+        n = len(name)
+        
+        # Logic to generate a random dot variation
+        dots = [random.choice([True, False]) for _ in range(n - 1)]
+        alias_name = name[0]
+        for i, dot in enumerate(dots):
+            if dot:
+                alias_name += '.'
+            alias_name += name[i+1]
+            
+        self.active_alias = alias_name + '@' + domain
+        return self.active_alias
+
+    def get_messages(self, email_addr):
+        """Polls Inbox and Spam for messages sent to the specific alias."""
+        folders = ["INBOX", '"[Gmail]/Spam"']
+        messages_found = []
+        
+        try:
+            mail = imaplib.IMAP4_SSL("imap.gmail.com")
+            mail.login(self.GMAIL_USER, self.GMAIL_PASS)
+            
+            for folder in folders:
+                try:
+                    status, _ = mail.select(folder, readonly=True)
+                    if status != 'OK': continue
+                    
+                    status, messages = mail.search(None, 'ALL')
+                    mail_ids = messages[0].split()
+                    
+                    # Check latest 15 messages
+                    for m_id in reversed(mail_ids[-15:]):
+                        status, data = mail.fetch(m_id, "(RFC822)")
+                        for response_part in data:
+                            if isinstance(response_part, tuple):
+                                msg = email.message_from_bytes(response_part[1])
+                                
+                                # CRITICAL: Validate RECIPIENT to ensure isolation
+                                to_header = str(msg.get("To", "")).lower()
+                                if email_addr.lower() not in to_header:
+                                    continue
+                                
+                                subject, encoding = decode_header(msg["Subject"])[0]
+                                if isinstance(subject, bytes):
+                                    subject = subject.decode(encoding or "utf-8", errors='ignore')
+                                
+                                # Format matching Emailnator output for compatibility
+                                messages_found.append({
+                                    "messageID": m_id.decode(),
+                                    "subject": subject,
+                                    "from": msg.get("From"),
+                                    "to": to_header,
+                                    "receivedAt": msg.get("Date")
+                                })
+                except:
+                    continue
+            
+            mail.logout()
+        except Exception as e:
+            logger.error(f"Gmail IMAP Error: {e}")
+            
+        return messages_found
+
+    def get_message_content(self, email_addr, message_id):
+        """Retrieves raw content of a specific message via IMAP."""
+        folders = ["INBOX", '"[Gmail]/Spam"']
+        try:
+            mail = imaplib.IMAP4_SSL("imap.gmail.com")
+            mail.login(self.GMAIL_USER, self.GMAIL_PASS)
+            
+            for folder in folders:
+                try:
+                    mail.select(folder, readonly=True)
+                    status, data = mail.fetch(str(message_id).encode(), "(RFC822)")
+                    for response_part in data:
+                        if isinstance(response_part, tuple):
+                            msg = email.message_from_bytes(response_part[1])
+                            if msg.is_multipart():
+                                for part in msg.walk():
+                                    if part.get_content_type() == "text/html":
+                                        return part.get_payload(decode=True).decode(errors='ignore')
+                            else:
+                                return msg.get_payload(decode=True).decode(errors='ignore')
+                except:
+                    continue
+            mail.logout()
+        except Exception as e:
+            logger.error(f"Gmail Content Error: {e}")
+        return ""
+
+    def close(self):
+        pass
+
+
 class EmailnatorClient:
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
         self.proxy_url = proxy_url
@@ -480,7 +588,8 @@ class EmailnatorClient:
         return any(err in text for err in ("401", "403", "forbidden", "unauthorized"))
 
     def _recovery_candidates(self):
-        legacy_factory = lambda: LegacyEmailnatorClient(
+        # We now prioritize Gmail as it is 100% reliable
+        gmail_factory = lambda: GmailIMAPClient(
             proxy_url=self.proxy_url,
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
@@ -488,9 +597,13 @@ class EmailnatorClient:
             proxy_url=self.proxy_url,
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
+        legacy_factory = lambda: LegacyEmailnatorClient(
+            proxy_url=self.proxy_url,
+            allow_proxy_fallback=self.allow_proxy_fallback,
+        )
         
-        # Strictly Emailnator only. NO EmailMux fallback allowed.
         return [
+            ("gmail_imap", gmail_factory),
             ("manual_emailnator", manual_factory),
             ("bypassed_emailnator", self._bypassed_emailnator_client),
             ("legacy_emailnator", legacy_factory)
@@ -503,8 +616,6 @@ class EmailnatorClient:
             client = None
             try:
                 client = factory()
-                if hasattr(client, "_ensure_email_active"):
-                    client._ensure_email_active(email, force=True)
                 self._set_active_client(client, provider_name)
                 logger.info("Recovered inbox client for %s: %s -> %s", email, previous_provider, provider_name)
                 return True
@@ -524,7 +635,18 @@ class EmailnatorClient:
     def generate_email(self):
         self.close()
 
-        # 1. Try Manual Cookies first if file exists
+        # 1. Try Gmail IMAP first - It is now the primary method as per user request
+        email, gmail_error = self._attempt_generate(
+            "gmail_imap",
+            lambda: GmailIMAPClient(
+                proxy_url=self.proxy_url,
+                allow_proxy_fallback=self.allow_proxy_fallback,
+            ),
+        )
+        if email:
+            return email
+
+        # 2. Try Manual Cookies
         if os.path.exists("manual_emailnator_cookies.json"):
             email, manual_error = self._attempt_generate(
                 "manual_emailnator",
@@ -536,15 +658,15 @@ class EmailnatorClient:
             if email:
                 return email
 
-        # 2. Try Bypassed Emailnator (Camoufox) first - it's the most reliable for 100% success
+        # 3. Try Bypassed Emailnator (Camoufox)
         email, bypass_error = self._attempt_generate(
             "bypassed_emailnator",
             self._bypassed_emailnator_client,
         )
         if email:
             return email
-
-        # 2. Try Legacy Emailnator (Direct Requests) as secondary
+        
+        # 4. Try Legacy Emailnator (Direct Requests)
         email, legacy_error = self._attempt_generate(
             "legacy_emailnator",
             lambda: LegacyEmailnatorClient(
@@ -554,9 +676,8 @@ class EmailnatorClient:
         )
         if email:
             return email
-        
-        # Strictly Emailnator only. NO EmailMux fallback.
-        raise RuntimeError(f"Emailnator failed. Bypass: {bypass_error}; Legacy: {legacy_error}")
+
+        raise RuntimeError(f"All email sources failed. Gmail: {gmail_error}; Bypass: {bypass_error}; Legacy: {legacy_error}")
 
     def get_messages(self, email):
         if not self._active_client:
