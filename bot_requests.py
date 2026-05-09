@@ -17,6 +17,13 @@ try:
 except ImportError:
     curl_requests = None
 
+try:
+    from botasaurus.browser import browser, Driver
+    from botasaurus.request import request as botasaurus_request
+except ImportError:
+    browser = None
+    botasaurus_request = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,36 +80,35 @@ def _load_camoufox_bypasser():
 
 class LegacyEmailnatorClient:
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
-        if curl_requests:
-            self.session = curl_requests.Session(impersonate="chrome124")
-        else:
-            self.session = requests.Session()
-            self.session.trust_env = False
-
+        self.impersonates = ["chrome110", "chrome101", "safari15_5"]
+        self.current_impersonate_idx = 0
+        self._init_session_obj(proxy_url)
         self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
-        if self.proxy_url:
-            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
+        self.init_session()
+
+    def _init_session_obj(self, proxy_url=None):
+        imp = self.impersonates[self.current_impersonate_idx % len(self.impersonates)]
+        if curl_requests:
+            # Use HTTP/1.1 to avoid some proxy issues
+            self.session = curl_requests.Session(impersonate=imp)
+        else:
+            self.session = requests.Session()
+            self.session.trust_env = False
+        
+        if proxy_url:
+            p = normalize_proxy_url(proxy_url)
+            self.session.proxies.update({"http": p, "https": p})
             
         if not curl_requests:
-            self.session.headers.update(
-                {
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                    ),
-                    "Accept": "application/json, text/plain, */*",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
-                }
-            )
+            self.session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
+            })
         else:
             self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
-            
-        self.init_session()
 
     @staticmethod
     def is_proxy_error(ex: Exception) -> bool:
@@ -116,23 +122,31 @@ class LegacyEmailnatorClient:
         self.using_proxy = False
 
     def _request(self, method, url, **kwargs):
-        for attempt in range(3):
+        last_ex = None
+        for attempt in range(5):
             try:
                 resp = self.session.request(method, url, **kwargs)
-                if resp.status_code == 429 and attempt < 2:
-                    time.sleep(5 + attempt * 5)
+                if resp.status_code == 403 and "just a moment" in resp.text.lower():
+                    logger.warning(f"Cloudflare detected on {url}. Changing impersonation...")
+                    self.current_impersonate_idx += 1
+                    self._init_session_obj(self.proxy_url if self.using_proxy else None)
+                    time.sleep(5)
+                    continue
+                if resp.status_code == 429 and attempt < 4:
+                    time.sleep(10 + attempt * 10)
                     continue
                 resp.raise_for_status()
                 return resp
             except requests.exceptions.RequestException as ex:
+                last_ex = ex
                 if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
                     self._disable_proxy()
                     return self._request(method, url, **kwargs)
-                if attempt < 2:
-                    time.sleep(2)
+                if attempt < 4:
+                    time.sleep(5)
                     continue
                 raise
-        raise RuntimeError("Max retries exceeded for email client")
+        raise last_ex or RuntimeError("Max retries exceeded for email client")
 
     def init_session(self):
         # 1. Load Homepage to get initial cookies
@@ -603,16 +617,16 @@ class DeepEarnClient:
         self.domain = domain
         self.base_url = f"https://{domain}"
         self.currency = DOMAIN_CURRENCY_MAP.get((domain or "").strip().lower(), "India")
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.using_proxy = bool(self.proxy_url)
         
         if curl_requests:
-            self.session = curl_requests.Session(impersonate="chrome124")
+            self.session = curl_requests.Session(impersonate="chrome110")
         else:
             self.session = requests.Session()
             self.session.trust_env = False
 
         self.allow_proxy_fallback = allow_proxy_fallback
-        self.proxy_url = normalize_proxy_url(proxy_url)
-        self.using_proxy = bool(self.proxy_url)
         if self.proxy_url:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         # Each client instance gets its own unique anon_uid — sessions are fully isolated
