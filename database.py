@@ -93,12 +93,44 @@ async def init_db():
         try:
             _select("users", columns="user_id", limit=1)
             _select("accounts", columns="id", limit=1)
+            # Try to select from gmail_credentials, if it fails, it will catch below
+            try:
+                _select("gmail_credentials", columns="id", limit=1)
+            except:
+                logger.warning("Table 'gmail_credentials' not found. Admin needs to run SQL for it.")
         except Exception as exc:
             raise RuntimeError(
                 "Supabase API is reachable but tables or policies are not ready. Run supabase_schema.sql in Supabase SQL Editor first."
             ) from exc
 
     await asyncio.to_thread(_sync_init)
+
+
+async def add_gmail_credential(email: str, app_password: str):
+    """Add a new Gmail account and App Password to the database."""
+    await asyncio.to_thread(
+        _request,
+        "POST",
+        "gmail_credentials",
+        params={"on_conflict": "email"},
+        json=[
+            {
+                "email": email.strip().lower(),
+                "app_password": app_password.strip(),
+            }
+        ],
+        prefer="resolution=merge-duplicates,return=minimal",
+    )
+
+
+async def get_gmail_credentials():
+    """Retrieve all Gmail credentials stored in the database."""
+    return await asyncio.to_thread(
+        _select,
+        "gmail_credentials",
+        columns="email, app_password",
+        order="created_at.desc",
+    )
 
 
 async def ping():

@@ -428,24 +428,38 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
 class GmailIMAPClient:
     """Client that uses personal Gmail via IMAP for 100% success and Dot-Trick support."""
     
-    # HARDCODED PRIMARY GMAIL - You can move this to config.py if needed
-    GMAIL_USER = "gulzarprasaddhar@gmail.com"
-    GMAIL_PASS = "aruvfhldkvynituj"
-
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
         self.proxy_url = proxy_url
         self.allow_proxy_fallback = allow_proxy_fallback
         self.active_alias = None
+        
+        # Default fallback credentials
+        self.gmail_user = "gulzarprasaddhar@gmail.com"
+        self.gmail_pass = "aruvfhldkvynituj"
+        
+        # Try to load from database
+        import database as db
+        try:
+            # Using asyncio.run here since we are in a sync thread usually
+            creds = asyncio.run(db.get_gmail_credentials())
+            if creds:
+                # Pick a random one for load balancing/rotation
+                selected = random.choice(creds)
+                self.gmail_user = selected.get("email")
+                self.gmail_pass = selected.get("app_password")
+                logger.info(f"Using Gmail credential from DB: {self.gmail_user}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch Gmail credentials from DB, using fallback: {e}")
 
     def generate_email(self, site_id=None):
         """Generates a unique Dot-Alias that hasn't been used yet for the specific site."""
         import database as db
-        name, domain = self.GMAIL_USER.split('@')
+        name, domain = self.gmail_user.split('@')
         n = len(name)
         
         # Logic to generate a unique alias based on site usage
         # We'll try up to 200 random combinations to find one that isn't linked in DB yet
-        best_candidate = self.GMAIL_USER
+        best_candidate = self.gmail_user
         for _ in range(200):
             dots = [random.choice([True, False]) for _ in range(n - 1)]
             alias_name = name[0]
@@ -481,7 +495,7 @@ class GmailIMAPClient:
         
         try:
             mail = imaplib.IMAP4_SSL("imap.gmail.com")
-            mail.login(self.GMAIL_USER, self.GMAIL_PASS)
+            mail.login(self.gmail_user, self.gmail_pass)
             
             for folder in folders:
                 try:
@@ -529,7 +543,7 @@ class GmailIMAPClient:
         folders = ["INBOX", '"[Gmail]/Spam"']
         try:
             mail = imaplib.IMAP4_SSL("imap.gmail.com")
-            mail.login(self.GMAIL_USER, self.GMAIL_PASS)
+            mail.login(self.gmail_user, self.gmail_pass)
             
             for folder in folders:
                 try:

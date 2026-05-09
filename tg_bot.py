@@ -40,6 +40,8 @@ class BotStates(StatesGroup):
     waiting_for_invite = State()
     waiting_for_proxy = State()
     waiting_for_password = State()
+    waiting_for_gmail_email = State()
+    waiting_for_gmail_app_pass = State()
 
 COUNTRIES = {
     "india": "🇮🇳 India",
@@ -62,6 +64,7 @@ async def setup_bot_commands():
     await bot.set_my_commands([
         BotCommand(command="start", description="Open the main menu"),
         BotCommand(command="setpassword", description="Set your default account password"),
+        BotCommand(command="addgmail", description="Add new Gmail & App Password (Admin only)"),
     ])
 
 async def safe_edit_message(message: Message, text: str, parse_mode: str = None):
@@ -208,6 +211,44 @@ async def cmd_setpassword(message: Message, state: FSMContext):
         return
     await message.answer("🔑 Enter your new custom default password for accounts:")
     await state.set_state(BotStates.waiting_for_password)
+
+@router.message(Command("addgmail"))
+async def cmd_addgmail(message: Message, state: FSMContext):
+    if message.from_user.id != config.ADMIN_USER_ID:
+        await message.answer("❌ This command is only available for the Admin.")
+        return
+    await message.answer("📧 Enter the **Gmail Address** you want to add:", parse_mode="Markdown", reply_markup=ForceReply())
+    await state.set_state(BotStates.waiting_for_gmail_email)
+
+@router.message(BotStates.waiting_for_gmail_email)
+async def process_new_gmail_email(message: Message, state: FSMContext):
+    if message.from_user.id != config.ADMIN_USER_ID: return
+    email_addr = message.text.strip().lower()
+    if not re.match(r"^[\w\.-]+@gmail\.com$", email_addr):
+        await message.answer("❌ Invalid format. Please send a valid **@gmail.com** address:")
+        return
+    await state.update_data(new_gmail=email_addr)
+    await message.answer(f"🔑 Now enter the **16-digit App Password** for `{email_addr}`:", parse_mode="Markdown", reply_markup=ForceReply())
+    await state.set_state(BotStates.waiting_for_gmail_app_pass)
+
+@router.message(BotStates.waiting_for_gmail_app_pass)
+async def process_new_gmail_app_pass(message: Message, state: FSMContext):
+    if message.from_user.id != config.ADMIN_USER_ID: return
+    app_pass = message.text.strip().replace(" ", "")
+    if len(app_pass) != 16:
+        await message.answer("❌ Invalid App Password. It must be exactly **16 characters** long. Please try again:")
+        return
+    
+    data = await state.get_data()
+    email_addr = data.get("new_gmail")
+    
+    try:
+        await db.add_gmail_credential(email_addr, app_pass)
+        await message.answer(f"✅ Successfully added `{email_addr}` to the rotation list!", parse_mode="Markdown", reply_markup=main_keyboard())
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"❌ Failed to save to database: {str(e)}")
+        await state.clear()
 
 @router.message(Command("updatecookies"))
 async def cmd_updatecookies(message: Message, state: FSMContext):
