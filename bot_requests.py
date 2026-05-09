@@ -80,10 +80,13 @@ class LegacyEmailnatorClient:
             {
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 ),
                 "Accept": "application/json, text/plain, */*",
                 "X-Requested-With": "XMLHttpRequest",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
             }
         )
         self.init_session()
@@ -493,9 +496,6 @@ class EmailnatorClient:
                 ("bypassed_emailnator", self._bypassed_emailnator_client),
                 ("legacy_emailnator", legacy_factory),
             ],
-            "emailmux_fallback": [
-                ("emailmux_fallback", self._fallback_client),
-            ],
         }
         return provider_map.get(self._provider_name, [])
 
@@ -527,7 +527,7 @@ class EmailnatorClient:
     def generate_email(self):
         import os
         # If SKIP_BROWSER_BYPASS=1 (e.g. on Render free tier to avoid OOM),
-        # skip Camoufox entirely and go straight to EmailMuxClient.
+        # skip Camoufox entirely and go straight to fallback.
         skip_browser = os.getenv("SKIP_BROWSER_BYPASS", "").strip() in ("1", "true", "yes")
         self.close()
 
@@ -556,17 +556,11 @@ class EmailnatorClient:
             legacy_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
             bypass_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
 
-        email, fallback_error = self._attempt_generate("emailmux_fallback", self._fallback_client)
-        if email:
-            return email
-
         if legacy_error or bypass_error:
             raise RuntimeError(
-                f"Legacy Emailnator failed: {legacy_error}; "
-                f"Bypassed Emailnator failed: {bypass_error}; "
-                f"EmailMux fallback failed: {fallback_error}"
-            ) from fallback_error
-        raise fallback_error
+                f"Emailnator failed: {legacy_error or bypass_error}"
+            )
+        raise RuntimeError("Could not generate email via Emailnator")
 
     def get_messages(self, email):
         if not self._active_client:
