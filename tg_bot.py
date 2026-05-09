@@ -222,8 +222,18 @@ async def cmd_updatecookies(message: Message, state: FSMContext):
 @router.message(BotStates.waiting_for_cookies)
 async def process_cookies(message: Message, state: FSMContext):
     if message.from_user.id != config.ADMIN_USER_ID:
+        await state.clear()
         return
         
+    # If user sends a command, cancel cookie update and clear state
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        # We don't return, we want the command to be processed by other handlers
+        # In aiogram 3, we can't easily "fall through" from here without re-sending
+        # So we just tell user it's canceled and they should send command again
+        await message.answer("🔄 Cookie update canceled. Please send your command again.")
+        return
+
     content = ""
     if message.document:
         # Handle file upload
@@ -240,13 +250,23 @@ async def process_cookies(message: Message, state: FSMContext):
     
     if not content:
         await message.answer("❌ No content found. Please send a file or text.")
+        await state.clear()
         return
 
     try:
         # Validate JSON
         json_data = json.loads(content)
-        if "cookies" not in json_data:
-            raise ValueError("Invalid format: 'cookies' key missing.")
+        
+        # Flexibility: Accept list (standard export) or dict
+        valid = False
+        if isinstance(json_data, list) and len(json_data) > 0:
+            valid = True
+        elif isinstance(json_data, dict):
+            # If it's our format with 'cookies' key or just a flat dict of cookies
+            valid = True
+            
+        if not valid:
+            raise ValueError("JSON must be a list of cookies or a dictionary.")
             
         with open("manual_emailnator_cookies.json", "w") as f:
             json.dump(json_data, f, indent=4)
@@ -254,7 +274,8 @@ async def process_cookies(message: Message, state: FSMContext):
         await message.answer("✅ Emailnator cookies updated successfully!", reply_markup=main_keyboard())
         await state.clear()
     except Exception as e:
-        await message.answer(f"❌ Failed to update cookies: {str(e)}")
+        await message.answer(f"❌ Failed to update cookies: {str(e)}\n\nState cleared. Please use /updatecookies to try again.")
+        await state.clear()
 
 @router.message(BotStates.waiting_for_password)
 async def process_password(message: Message, state: FSMContext):
