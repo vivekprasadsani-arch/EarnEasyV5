@@ -829,24 +829,50 @@ class DeepEarnClient:
             f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25
         )
 
+    def _rotate_device_fingerprint(self):
+        """Generates a brand new device identity for retries."""
+        import uuid as _uuid
+        ts = int(time.time() * 1000)
+        rand = _uuid.uuid4().hex
+        self.anon_uid = f"{ts}{rand}"
+        self.signer = DeepEarnSigner(anon_uid=self.anon_uid)
+        
+        self.default_headers.update({
+            "Device-Model": random.choice(["Pixel 6", "Pixel 7", "SM-S901B", "SM-G991B", "OnePlus 10", "Redmi Note 11", "Vivo V23", "Pixel 8", "SM-S918B"]),
+            "Language": random.choice(["en", "en-US", "en-GB", "en-PK", "en-IN"]),
+            "Anonymous-Uid": self.anon_uid,
+            "Network-Type": random.choice(["wifi", "4g", "5g"]),
+            "User-Agent": random.choice([
+                "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 12; Redmi Note 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (Linux; Android 13; OnePlus 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
+            ]),
+        })
+
     def _post(self, path, data):
         last_error = None
-        for attempt in range(3):
+        for attempt in range(5): # Increased retries
             try:
                 if attempt > 0:
-                    time.sleep(random.uniform(5, 15))
+                    # Very short sleep, trusting proxy rotation
+                    time.sleep(random.uniform(1, 3))
                 resp = self._request_post(path, data)
-                if resp.status_code in (403, 429) and attempt < 2:
-                    logger.warning(f"Got {resp.status_code} on attempt {attempt+1}, retrying...")
+                if resp.status_code in (403, 429) and attempt < 4:
+                    logger.warning(f"Got {resp.status_code} on attempt {attempt+1}, rotating fingerprint...")
+                    self._rotate_device_fingerprint()
                     continue
                 resp.raise_for_status()
                 try:
                     res_json = resp.json()
                     # Check for business-level rate limits
                     msg = str(res_json.get("msg") or "").lower()
-                    if "frequent" in msg and attempt < 2:
-                        logger.warning(f"Business rate limit hit: {msg}. Sleeping longer...")
-                        time.sleep(20 + attempt * 10) # Increased sleep
+                    if "frequent" in msg and attempt < 4:
+                        logger.warning(f"DeepEarn Frequency Block: {msg}. Rotating device identity and retrying...")
+                        self._rotate_device_fingerprint()
+                        time.sleep(2)
                         continue
                     return res_json
                 except ValueError:
@@ -856,10 +882,10 @@ class DeepEarnClient:
                 last_error = ex
                 if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
                     self._disable_proxy()
-                    # Re-try immediately once without proxy
                     return self._post(path, data)
-                if attempt < 2:
-                    time.sleep(random.uniform(5, 10))
+                if attempt < 4:
+                    self._rotate_device_fingerprint()
+                    time.sleep(2)
                     continue
                 raise last_error
         if last_error:
