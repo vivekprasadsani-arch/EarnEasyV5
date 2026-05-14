@@ -787,7 +787,13 @@ class DeepEarnClient:
         rand = _uuid.uuid4().hex
         self.anon_uid = f"{ts}{rand}"
         self.signer = DeepEarnSigner(anon_uid=self.anon_uid)
+        
+        # Determine version based on domain
         self.version = "13.5.1"
+        clean_domain = (domain or "").strip().lower()
+        if clean_domain.startswith("p1."):
+            self.version = "13.1.1" # Pakistan uses older version
+            
         self.default_headers = {
             "Accept": "*/*",
             "Content-Type": "application/json;charset=UTF-8",

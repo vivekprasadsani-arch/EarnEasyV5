@@ -23,7 +23,8 @@ class Signer:
 
 class WaLinkClient:
     DOMAIN_VERSION_MAP = {
-        "p1.x7bb.com":   "13.5.1",
+        "p1.x7bb.com":   "13.1.1", # Pakistan uses older version
+        "p1.3dp9.com":   "13.1.1", 
         "s1.n8o9.com":   "13.5.1",
         "s1.4e22.com":   "13.5.1",
         "a1.8xy5.com":   "13.5.1",
@@ -93,7 +94,11 @@ class WaLinkClient:
 
     @classmethod
     def _version_for_domain(cls, domain: str) -> str:
-        return cls.DOMAIN_VERSION_MAP.get((domain or "").strip().lower(), "13.5.1")
+        domain = (domain or "").strip().lower()
+        # Explicit check for Pakistan domains starting with p1.
+        if domain.startswith("p1."):
+            return "13.1.1"
+        return cls.DOMAIN_VERSION_MAP.get(domain, "13.5.1")
 
     def set_domain(self, domain: str):
         clean = (domain or "").strip()
