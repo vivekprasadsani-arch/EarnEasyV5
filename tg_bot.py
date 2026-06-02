@@ -368,17 +368,36 @@ async def test_proxy_connection(cq: CallbackQuery):
     
     def _sync_test():
         import requests
-        try:
-            res = requests.get(
-                "https://httpbin.org/ip",
-                proxies={"http": proxy, "https": proxy},
-                timeout=15,
-            )
-            res.raise_for_status()
-            origin_ip = (res.json() or {}).get("origin", "unknown")
-            return True, f"✅ Proxy is working!\n\nIP: `{origin_ip}`"
-        except Exception as e:
-            return False, f"❌ Proxy failed.\n\n`{str(e)}`"
+        # List of endpoints to test proxy against
+        endpoints = [
+            "https://api.ipify.org?format=json",
+            "https://ifconfig.me/all.json",
+            "https://httpbin.org/ip",
+            "https://ipinfo.io/json"
+        ]
+        
+        last_err = ""
+        for url in endpoints:
+            for attempt in range(2): # 2 attempts per endpoint
+                try:
+                    res = requests.get(
+                        url,
+                        proxies={"http": proxy, "https": proxy},
+                        timeout=12,
+                    )
+                    if res.status_code == 200:
+                        try:
+                            data = res.json()
+                            ip = data.get("ip") or data.get("origin") or data.get("ip_addr") or "unknown"
+                            return True, f"✅ Proxy is working!\n\nTested via: `{urlparse(url).netloc}`\nIP: `{ip}`"
+                        except:
+                            return True, f"✅ Proxy is working! (HTTP 200)"
+                    res.raise_for_status()
+                except Exception as e:
+                    last_err = str(e)
+                    time.sleep(1)
+        
+        return False, f"❌ Proxy failed on all test endpoints.\n\nLatest Error: `{last_err}`"
 
     success, msg = await asyncio.to_thread(_sync_test)
     await cq.message.answer(msg, parse_mode="Markdown")
