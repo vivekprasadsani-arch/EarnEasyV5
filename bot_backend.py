@@ -209,7 +209,7 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 provider_name = getattr(email_client, "provider_name", "unknown")
                 logger.info("OTP polling started for %s via %s", email, provider_name)
 
-                poll_count = OTP_MAX_POLLS if use_emailnator else 15
+                poll_count = 5
                 for poll_index in range(poll_count):
                     if poll_index:
                         time.sleep(OTP_POLL_INTERVAL_SECONDS if use_emailnator else 3)
