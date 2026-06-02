@@ -1,36 +1,132 @@
 import asyncio
 import hashlib
 import json
-import os
 import random
 import re
 import string
 import sys
 import time
 import imaplib
-import email
-from email.header import decode_header
+import email as email_lib
 from html import unescape
 import logging
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import requests
-try:
-    from curl_cffi import requests as curl_requests
-except ImportError:
-    curl_requests = None
 
 logger = logging.getLogger(__name__)
 
-try:
-    from botasaurus.browser import browser, Driver
-    from botasaurus.request import request as botasaurus_request
-except Exception as e:
-    # Botasaurus can fail during import if it tries to download binaries and hits GitHub rate limits
-    logger.warning(f"Could not import botasaurus (likely GitHub rate limit): {e}")
-    browser = None
-    botasaurus_request = None
+# --- Gmail IMAP & Alias Logic ---
+
+class GmailIMAPClient:
+    def __init__(self, user, pwd):
+        self.user = user
+        self.pwd = pwd
+        self.mail = None
+
+    def connect(self):
+        try:
+            self.mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=15)
+            self.mail.login(self.user, self.pwd)
+            return True
+        except Exception as e:
+            logger.error(f"Gmail IMAP connection failed for {self.user}: {e}")
+            return False
+
+    def get_messages(self, target_email):
+        if not self.mail:
+            if not self.connect():
+                return []
+        
+        messages = []
+        # Search both Inbox and Spam
+        for folder in ["INBOX", "[Gmail]/Spam"]:
+            try:
+                self.mail.select(folder)
+                # Search for emails sent to the alias
+                status, data = self.mail.search(None, f'TO "{target_email}"')
+                if status != 'OK':
+                    continue
+                
+                # Fetch only the last 3 messages to save time
+                for m_id in reversed(data[0].split()[-3:]):
+                    status, msg_data = self.mail.fetch(m_id, '(RFC822)')
+                    msg = email_lib.message_from_bytes(msg_data[0][1])
+                    
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                body = part.get_payload(decode=True).decode(errors="ignore")
+                                break
+                    else:
+                        body = msg.get_payload(decode=True).decode(errors="ignore")
+                    
+                    messages.append({
+                        "body": body,
+                        "subject": str(msg.get("Subject", "")),
+                        "messageID": str(m_id)
+                    })
+            except Exception as e:
+                logger.debug(f"IMAP fetch error in {folder}: {e}")
+                continue
+        return messages
+
+    def close(self):
+        try:
+            if self.mail:
+                self.mail.logout()
+        except:
+            pass
+
+class GmailEmailClient:
+    def __init__(self, site_id, cred):
+        """cred = {'email': '...', 'password': '...' (App Password)}"""
+        self.site_id = (site_id or "").lower()
+        self.cred = cred
+        self.imap = GmailIMAPClient(cred['email'], cred['password'])
+        # For compatibility with EmailnatorClient interface
+        self.provider_name = "gmail_alias"
+
+    def generate_email(self, db_check_func=None):
+        """Generates a random dot-alias for the provided Gmail."""
+        local_part, domain = self.cred['email'].split('@')
+        
+        # Limit retries to find a unique alias
+        for _ in range(50):
+            alias = ""
+            # Randomly insert dots
+            dots = [random.choice([True, False]) for _ in range(len(local_part)-1)]
+            for i in range(len(local_part)-1):
+                alias += local_part[i]
+                if dots[i]:
+                    alias += "."
+            alias += local_part[-1]
+            email = f"{alias}@{domain}"
+            
+            if db_check_func:
+                if not asyncio.run(db_check_func(email, self.site_id)):
+                    return email
+            else:
+                return email
+        return None
+
+    def get_messages(self, email):
+        return self.imap.get_messages(email)
+        
+    def get_message_content(self, email, message_id):
+        # The body is already included in get_messages for Gmail logic to speed up
+        msgs = self.get_messages(email)
+        for m in msgs:
+            if m['messageID'] == message_id:
+                return m['body']
+        return ""
+
+    def close(self):
+        self.imap.close()
+
+# --- Existing DeepEarn Signer ---
 
 
 class DeepEarnSigner:
@@ -63,40 +159,12 @@ def normalize_proxy_url(proxy_url: str) -> str:
 
 
 _CF_BYPASSER_CLASS = None
-NOTIFICATION_CALLBACKS = []
-
-def add_notification_callback(callback):
-    """Add a callback function to be called when manual intervention is needed."""
-    if callback not in NOTIFICATION_CALLBACKS:
-        NOTIFICATION_CALLBACKS.append(callback)
-
-def notify_admin(message):
-    """Trigger all registered notification callbacks safely across threads."""
-    for cb in NOTIFICATION_CALLBACKS:
-        try:
-            if asyncio.iscoroutinefunction(cb):
-                # worker threads don't have their own event loop, so we find the main one
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.call_soon_threadsafe(asyncio.create_task, cb(message))
-                    else:
-                        logger.error(f"Cannot notify admin: Loop not running. Msg: {message}")
-                except RuntimeError:
-                    logger.error(f"Cannot notify admin: No loop in thread. Msg: {message}")
-            else:
-                cb(message)
-        except Exception as e:
-            logger.error(f"Error in notification callback: {e}")
 
 
 def _load_camoufox_bypasser():
     global _CF_BYPASSER_CLASS
     if _CF_BYPASSER_CLASS is not None:
         return _CF_BYPASSER_CLASS
-
-    # Disable Camoufox update checks BEFORE importing to prevent GitHub API rate limit crashes
-    os.environ["CAMOUFOX_ALLOW_UPDATE"] = "0"
 
     repo_dir = Path(__file__).resolve().parent / "CloudflareBypassForScraping-main"
     if not repo_dir.exists():
@@ -107,13 +175,6 @@ def _load_camoufox_bypasser():
         sys.path.insert(0, repo_path)
 
     from cf_bypasser.core.bypasser import CamoufoxBypasser
-    
-    # Deeply suppress any update checks in camoufox
-    try:
-        import camoufox.utils as cf_utils
-        cf_utils.check_for_updates = lambda *args, **kwargs: None
-    except:
-        pass
 
     _CF_BYPASSER_CLASS = CamoufoxBypasser
     return _CF_BYPASSER_CLASS
@@ -121,151 +182,68 @@ def _load_camoufox_bypasser():
 
 class LegacyEmailnatorClient:
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
-        self.impersonates = ["chrome110", "chrome101", "safari15_5"]
-        self.current_impersonate_idx = 0
+        self.session = requests.Session()
+        self.session.trust_env = False
         self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
-        self._init_session_obj(self.proxy_url if self.using_proxy else None)
-        self.init_session()
-
-    def _init_session_obj(self, proxy_url=None):
-        imp = self.impersonates[self.current_impersonate_idx % len(self.impersonates)]
-        
-        if curl_requests:
-            try:
-                # Force http_version=1 (HTTP/1.1) to avoid 'Proxy CONNECT aborted' errors
-                self.session = curl_requests.Session(impersonate=imp, http_version=1)
-            except Exception as e:
-                logger.warning(f"curl_cffi session init failed: {e}. Falling back to requests.")
-                self.session = requests.Session()
-                self.session.trust_env = False
-        else:
-            self.session = requests.Session()
-            self.session.trust_env = False
-        
-        if proxy_url:
-            p = normalize_proxy_url(proxy_url)
-            self.session.proxies.update({"http": p, "https": p})
-            
-        if not hasattr(self.session, "impersonate"):
-            self.session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        if self.proxy_url:
+            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
                 "Accept": "application/json, text/plain, */*",
                 "X-Requested-With": "XMLHttpRequest",
-            })
-        else:
-            # When using curl_cffi impersonate, we only add minimal required headers
-            self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
+            }
+        )
+        self.init_session()
 
-    def is_proxy_error(self, ex: Exception) -> bool:
-        """Check if the error is related to proxy connectivity."""
+    @staticmethod
+    def is_proxy_error(ex: Exception) -> bool:
         if isinstance(ex, requests.exceptions.ProxyError):
             return True
         text = str(ex).lower()
-        return any(err in text for err in ("proxy", "407", "remote end closed", "tunnel connection failed", "curl error 56", "curl error 35"))
+        return (
+            "proxy" in text
+            or "407" in text
+            or "remote end closed" in text
+            or "tunnel connection failed" in text
+        )
 
     def _disable_proxy(self):
         self.session.proxies.clear()
         self.using_proxy = False
 
     def _request(self, method, url, **kwargs):
-        last_ex = None
-        for attempt in range(5):
-            try:
+        try:
+            resp = self.session.request(method, url, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.RequestException as ex:
+            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+                self._disable_proxy()
                 resp = self.session.request(method, url, **kwargs)
-                if resp.status_code == 403 and "just a moment" in resp.text.lower():
-                    logger.warning(f"Cloudflare detected on {url}. Changing impersonation...")
-                    self.current_impersonate_idx += 1
-                    self._init_session_obj(self.proxy_url if self.using_proxy else None)
-                    time.sleep(5)
-                    continue
-                if resp.status_code == 429 and attempt < 4:
-                    time.sleep(10 + attempt * 10)
-                    continue
                 resp.raise_for_status()
                 return resp
-            except Exception as ex:
-                last_ex = ex
-                err_str = str(ex).lower()
-                # Handle curl_cffi proxy errors
-                if any(e in err_str for e in ("curl error 56", "proxy connect aborted", "curl error 35")):
-                    logger.warning(f"Proxy error with curl_cffi: {ex}. Attempting protocol switch...")
-                    self.current_impersonate_idx += 1
-                    self._init_session_obj(self.proxy_url if self.using_proxy else None)
-                    
-                    if attempt > 2: # After a few tries, fall back to standard requests
-                        logger.warning("Switching to standard requests fallback...")
-                        old_session = self.session
-                        self.session = requests.Session()
-                        self.session.trust_env = False
-                        if self.using_proxy:
-                            p = normalize_proxy_url(self.proxy_url)
-                            self.session.proxies.update({"http": p, "https": p})
-                        self.session.headers.update({
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Accept": "application/json, text/plain, */*",
-                            "X-Requested-With": "XMLHttpRequest",
-                        })
-                        try:
-                            res = self.session.request(method, url, **kwargs)
-                            res.raise_for_status()
-                            return res
-                        except Exception:
-                            self.session = old_session # Restore if fallback also fails
-                            pass
-
-                if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
-                    self._disable_proxy()
-                    return self._request(method, url, **kwargs)
-                if attempt < 4:
-                    time.sleep(5)
-                    continue
-                raise
-        raise last_ex or RuntimeError("Max retries exceeded for email client")
+            raise
 
     def init_session(self):
-        # 1. Load Homepage to get initial cookies
         self._request("GET", "https://www.emailnator.com/", timeout=25)
-        self._update_xsrf_token()
-        # 2. Hit mailbox endpoint to initialize session for inboxes
-        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
-        self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
-        self._update_xsrf_token()
-
-    def _update_xsrf_token(self):
         xsrf_token = self.session.cookies.get("XSRF-TOKEN")
         if xsrf_token:
-            # Use raw cookie value for X-XSRF-TOKEN header
             self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
 
     def generate_email(self):
-        # We'll try dotGmail specifically as it's more stable for DeepEarn
-        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
         resp = self._request(
             "POST",
-            "https://www.emailnator.com/generate-email", 
-            json={"email": ["dotGmail"]}, 
-            timeout=25
+            "https://www.emailnator.com/generate-email", json={"email": ["dotGmail"]}, timeout=25
         )
-        email = (resp.json().get("email") or [None])[0]
-        if not email:
-            raise RuntimeError("Emailnator returned empty email list")
-        
-        # After generating, we 'visit' the mailbox to activate it
-        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
-        self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
-        self._update_xsrf_token()
-        
-        return email
+        return (resp.json().get("email") or [None])[0]
 
     def get_messages(self, email):
-        # Set referer to mailbox as seen in HAR
-        self.session.headers.update({
-            "Referer": "https://www.emailnator.com/mailbox/",
-            "Origin": "https://www.emailnator.com"
-        })
-        self._update_xsrf_token()
         resp = self._request(
             "POST",
             "https://www.emailnator.com/message-list", json={"email": email}, timeout=25
@@ -273,12 +251,6 @@ class LegacyEmailnatorClient:
         return resp.json().get("messageData", [])
 
     def get_message_content(self, email, message_id):
-        # Set referer to mailbox as seen in HAR
-        self.session.headers.update({
-            "Referer": "https://www.emailnator.com/mailbox/",
-            "Origin": "https://www.emailnator.com"
-        })
-        self._update_xsrf_token()
         resp = self._request(
             "POST",
             "https://www.emailnator.com/message-list",
@@ -294,88 +266,14 @@ class LegacyEmailnatorClient:
             pass
 
 
-class ManualEmailnatorClient(LegacyEmailnatorClient):
-    """Client that uses manually captured cookies from a JSON file."""
-    COOKIE_FILE = "manual_emailnator_cookies.json"
-
-    def __init__(self, proxy_url=None, allow_proxy_fallback=True):
-        self.impersonates = ["chrome110", "chrome101", "safari15_5"]
-        self.current_impersonate_idx = 0
-        self.allow_proxy_fallback = allow_proxy_fallback
-        self.proxy_url = normalize_proxy_url(proxy_url)
-        self.using_proxy = bool(self.proxy_url)
-        
-        # We manually set up standard requests session for manual cookies
-        self.session = requests.Session()
-        self.session.trust_env = False
-        if self.proxy_url:
-            p = normalize_proxy_url(self.proxy_url)
-            self.session.proxies.update({"http": p, "https": p})
-        
-        self.init_session()
-
-    def init_session(self):
-        try:
-            if not os.path.exists(self.COOKIE_FILE):
-                raise FileNotFoundError(f"Manual cookie file {self.COOKIE_FILE} not found")
-                
-            with open(self.COOKIE_FILE, "r") as f:
-                data = json.load(f)
-            
-            # 1. Handle User-Agent
-            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            if isinstance(data, dict):
-                user_agent = data.get("user_agent", user_agent)
-            
-            self.session.headers.update({
-                "User-Agent": user_agent,
-                "X-Requested-With": "XMLHttpRequest"
-            })
-            
-            # 2. Handle Cookies (Dict or List format)
-            cookie_dict = {}
-            if isinstance(data, list):
-                # Standard browser export format: [{"name": "...", "value": "..."}, ...]
-                for c in data:
-                    if isinstance(c, dict) and 'name' in c and 'value' in c:
-                        cookie_dict[c['name']] = c['value']
-            elif isinstance(data, dict):
-                cookie_dict = data.get("cookies", data)
-
-            for name, value in cookie_dict.items():
-                self.session.cookies.set(name, value, domain="www.emailnator.com")
-            
-            # Verify if cookies work by hitting mailbox
-            try:
-                self._update_xsrf_token()
-                self.session.headers.update({"Referer": "https://www.emailnator.com/"})
-                resp = self.session.get("https://www.emailnator.com/mailbox/", timeout=25, proxies=self.session.proxies)
-                if resp.status_code == 403:
-                    raise RuntimeError("Cloudflare 403 on manual cookies")
-                resp.raise_for_status()
-                self._update_xsrf_token()
-            except Exception as e:
-                logger.warning(f"Verification check failed: {e}")
-                raise
-            
-            logger.info("Manual cookies loaded and verified successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load manual cookies: {e}")
-            if "403" in str(e) or "forbidden" in str(e).lower():
-                notify_admin("âš ï¸ Manual Emailnator cookies have expired or been blocked. Please capture NEW cookies USING THE PAKISTAN PROXY and upload using /updatecookies")
-            raise
-
-
 class BypassedEmailnatorClient(LegacyEmailnatorClient):
     EMAILNATOR_URL = "https://www.emailnator.com/"
 
     def init_session(self):
         self._bootstrap_via_cloudflare_bypass()
-        self._update_xsrf_token()
-        # Ensure session is active for mailboxes
-        self.session.headers.update({"Referer": "https://www.emailnator.com/"})
-        self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
-        self._update_xsrf_token()
+        xsrf_token = self.session.cookies.get("XSRF-TOKEN")
+        if xsrf_token:
+            self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
 
     def _bootstrap_via_cloudflare_bypass(self):
         last_error = None
@@ -390,8 +288,7 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
             try:
                 bypasser_cls = _load_camoufox_bypasser()
                 cache_file = str(Path(__file__).resolve().with_name("cf_emailnator_cookie_cache.json"))
-                # Use higher retries for browser bypass on Render
-                bypasser = bypasser_cls(max_retries=5, log=True, cache_file=cache_file)
+                bypasser = bypasser_cls(max_retries=3, log=False, cache_file=cache_file)
                 data = asyncio.run(
                     bypasser.get_or_generate_html(
                         self.EMAILNATOR_URL,
@@ -402,7 +299,7 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
                 if not data or not data.get("cookies"):
                     raise RuntimeError("Cloudflare bypass returned no cookies")
 
-                self.session.headers["User-Agent"] = data.get("user_agent") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                self.session.headers["User-Agent"] = data.get("user_agent") or self.session.headers["User-Agent"]
                 self.session.headers["Referer"] = self.EMAILNATOR_URL
                 self.session.headers["Origin"] = self.EMAILNATOR_URL.rstrip("/")
 
@@ -425,148 +322,170 @@ class BypassedEmailnatorClient(LegacyEmailnatorClient):
         raise RuntimeError("Cloudflare bypass bootstrap failed")
 
 
-class GmailIMAPClient:
-    """Client that uses personal Gmail via IMAP for 100% success and Dot-Trick support."""
-    
+class EmailMuxClient:
+    BASE_URL = "https://emailmux.com"
+    API_SECRET = "yjd683c@47"
+    LOCALE = "en"
+
     def __init__(self, proxy_url=None, allow_proxy_fallback=True):
-        self.proxy_url = proxy_url
+        self.session = requests.Session()
+        self.session.trust_env = False
         self.allow_proxy_fallback = allow_proxy_fallback
-        self.active_alias = None
-        
-        # Default fallback credentials
-        self.gmail_user = "gulzarprasaddhar@gmail.com"
-        self.gmail_pass = "aruvfhldkvynituj"
-        
-        # Try to load from database
-        import database as db
-        try:
-            # Using asyncio.run here since we are in a sync thread usually
-            creds = asyncio.run(db.get_gmail_credentials())
-            if creds:
-                # Pick a random one for load balancing/rotation
-                selected = random.choice(creds)
-                self.gmail_user = selected.get("email")
-                self.gmail_pass = selected.get("app_password")
-                logger.info(f"Using Gmail credential from DB: {self.gmail_user}")
-        except Exception as e:
-            logger.warning(f"Failed to fetch Gmail credentials from DB, using fallback: {e}")
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.using_proxy = bool(self.proxy_url)
+        self._active_email = ""
+        self._active_email_ts = 0.0
+        if self.proxy_url:
+            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"{self.BASE_URL}/{self.LOCALE}/temporary-gmail",
+            }
+        )
 
-    def generate_email(self, site_id=None):
-        """Generates a unique Dot-Alias that hasn't been used yet for the specific site."""
-        import database as db
-        name, domain = self.gmail_user.split('@')
-        n = len(name)
-        
-        # Logic to generate a unique alias based on site usage
-        # We'll try up to 200 random combinations to find one that isn't linked in DB yet
-        best_candidate = self.gmail_user
-        for _ in range(200):
-            dots = [random.choice([True, False]) for _ in range(n - 1)]
-            alias_name = name[0]
-            for i, dot in enumerate(dots):
-                if dot:
-                    alias_name += '.'
-                alias_name += name[i+1]
-                
-            candidate = alias_name + '@' + domain
-            best_candidate = candidate
-            
-            if not site_id:
-                break
-                
-            # Check if this specific alias is already linked for this site
-            try:
-                # We are in a sync thread (_sync_create), so we can use asyncio.run 
-                # to call the async DB check.
-                is_used = asyncio.run(db.is_email_used_on_site(site_id, candidate))
-                if not is_used:
-                    break
-            except:
-                # If DB check fails, just take the candidate
-                break
-            
-        self.active_alias = best_candidate
-        return self.active_alias
+    @staticmethod
+    def is_proxy_error(ex: Exception) -> bool:
+        if isinstance(ex, requests.exceptions.ProxyError):
+            return True
+        text = str(ex).lower()
+        return (
+            "proxy" in text
+            or "407" in text
+            or "remote end closed" in text
+            or "tunnel connection failed" in text
+        )
 
-    def get_messages(self, email_addr):
-        """Polls Inbox and Spam for messages sent to the specific alias."""
-        folders = ["INBOX", '"[Gmail]/Spam"']
-        messages_found = []
-        
-        try:
-            mail = imaplib.IMAP4_SSL("imap.gmail.com")
-            mail.login(self.gmail_user, self.gmail_pass)
-            
-            for folder in folders:
-                try:
-                    status, _ = mail.select(folder, readonly=True)
-                    if status != 'OK': continue
-                    
-                    status, messages = mail.search(None, 'ALL')
-                    mail_ids = messages[0].split()
-                    
-                    # Check latest 15 messages
-                    for m_id in reversed(mail_ids[-15:]):
-                        status, data = mail.fetch(m_id, "(RFC822)")
-                        for response_part in data:
-                            if isinstance(response_part, tuple):
-                                msg = email.message_from_bytes(response_part[1])
-                                
-                                # CRITICAL: Validate RECIPIENT to ensure isolation
-                                to_header = str(msg.get("To", "")).lower()
-                                if email_addr.lower() not in to_header:
-                                    continue
-                                
-                                subject, encoding = decode_header(msg["Subject"])[0]
-                                if isinstance(subject, bytes):
-                                    subject = subject.decode(encoding or "utf-8", errors='ignore')
-                                
-                                # Format matching Emailnator output for compatibility
-                                messages_found.append({
-                                    "messageID": m_id.decode(),
-                                    "subject": subject,
-                                    "from": msg.get("From"),
-                                    "to": to_header,
-                                    "receivedAt": msg.get("Date")
-                                })
-                except:
-                    continue
-            
-            mail.logout()
-        except Exception as e:
-            logger.error(f"Gmail IMAP Error: {e}")
-            
-        return messages_found
+    def _disable_proxy(self):
+        self.session.proxies.clear()
+        self.using_proxy = False
 
-    def get_message_content(self, email_addr, message_id):
-        """Retrieves raw content of a specific message via IMAP."""
-        folders = ["INBOX", '"[Gmail]/Spam"']
+    def _request(self, method, url, **kwargs):
         try:
-            mail = imaplib.IMAP4_SSL("imap.gmail.com")
-            mail.login(self.gmail_user, self.gmail_pass)
-            
-            for folder in folders:
-                try:
-                    mail.select(folder, readonly=True)
-                    status, data = mail.fetch(str(message_id).encode(), "(RFC822)")
-                    for response_part in data:
-                        if isinstance(response_part, tuple):
-                            msg = email.message_from_bytes(response_part[1])
-                            if msg.is_multipart():
-                                for part in msg.walk():
-                                    if part.get_content_type() == "text/html":
-                                        return part.get_payload(decode=True).decode(errors='ignore')
-                            else:
-                                return msg.get_payload(decode=True).decode(errors='ignore')
-                except:
-                    continue
-            mail.logout()
-        except Exception as e:
-            logger.error(f"Gmail Content Error: {e}")
-        return ""
+            resp = self.session.request(method, url, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.RequestException as ex:
+            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+                self._disable_proxy()
+                resp = self.session.request(method, url, **kwargs)
+                resp.raise_for_status()
+                return resp
+            raise
+
+    def _signed_headers(self, email: str) -> dict:
+        timestamp = str(int(time.time() * 1000))
+        signature = hashlib.md5(f"{self.API_SECRET}{email}{timestamp}".encode("utf-8")).hexdigest()
+        return {
+            "Content-Type": "application/json",
+            "X-API-Timestamp": timestamp,
+            "X-API-Signature": signature,
+        }
+
+    def _bootstrap_session(self):
+        self._request("GET", f"{self.BASE_URL}/domains", timeout=25)
+
+    def _activate_email(self, email: str):
+        resp = self._request(
+            "GET",
+            f"{self.BASE_URL}/use-email?email={quote(email)}",
+            headers=self._signed_headers(email),
+            timeout=25,
+        )
+        data = resp.json()
+        if data.get("status") != "success":
+            raise RuntimeError(f"EmailMux activation failed: {data.get('msg') or 'unknown error'}")
+        self._active_email = email
+        self._active_email_ts = time.time()
+
+    def _ensure_email_active(self, email: str, *, force: bool = False):
+        same_email = email and email == self._active_email
+        recently_activated = (time.time() - self._active_email_ts) < 20
+        if force or not same_email or not recently_activated:
+            self._activate_email(email)
+
+    @staticmethod
+    def _extract_email_html(page_html: str) -> str:
+        match = re.search(
+            r'<script id="email-html-data" type="application/json">\s*"(.*?)"\s*</script>',
+            page_html,
+            re.S,
+        )
+        if not match:
+            return page_html
+        encoded = f'"{match.group(1)}"'
+        return unescape(json.loads(encoded))
+
+    @staticmethod
+    def _is_deepearn_compatible_email(email: str) -> bool:
+        local_part, _, domain = (email or "").partition("@")
+        return bool(local_part) and domain.lower() == "gmail.com" and "+" not in local_part
+
+    def generate_email(self):
+        self._bootstrap_session()
+        last_error = None
+        for _ in range(8):
+            resp = self._request(
+                "POST",
+                f"{self.BASE_URL}/generate-email",
+                json={"domains": ["gmail"]},
+                timeout=25,
+            )
+            data = resp.json()
+            if data.get("status") != "success":
+                raise RuntimeError(f"EmailMux generation failed: {data.get('msg') or 'unknown error'}")
+            email = (data.get("email") or "").strip()
+            if not email:
+                last_error = RuntimeError("EmailMux returned an empty email address")
+                continue
+            self._ensure_email_active(email, force=True)
+            if self._is_deepearn_compatible_email(email):
+                return email
+            last_error = RuntimeError(f"EmailMux generated unsupported alias: {email}")
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("EmailMux could not generate a supported gmail address")
+
+    def get_messages(self, email):
+        self._ensure_email_active(email)
+        resp = self._request(
+            "GET",
+            f"{self.BASE_URL}/emails?email={quote(email)}",
+            headers=self._signed_headers(email),
+            timeout=25,
+        )
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        normalized = []
+        for item in data:
+            if isinstance(item, dict):
+                clone = dict(item)
+                if clone.get("uuid") and not clone.get("messageID"):
+                    clone["messageID"] = clone["uuid"]
+                normalized.append(clone)
+        return normalized
+
+    def get_message_content(self, email, message_id):
+        self._ensure_email_active(email)
+        resp = self._request(
+            "GET",
+            f"{self.BASE_URL}/{self.LOCALE}/email/{message_id}",
+            headers=self._signed_headers(email),
+            timeout=25,
+        )
+        return self._extract_email_html(resp.text)
 
     def close(self):
-        pass
+        try:
+            self.session.close()
+        except Exception:
+            pass
 
 
 class EmailnatorClient:
@@ -594,21 +513,11 @@ class EmailnatorClient:
         self._active_client = client
         self._provider_name = provider_name
 
-    def _attempt_generate(self, provider_name, factory, site_id=None):
+    def _attempt_generate(self, provider_name, factory):
         client = None
         try:
             client = factory()
-            # Pass site_id to generator if supported
-            if hasattr(client, "generate_email"):
-                import inspect
-                sig = inspect.signature(client.generate_email)
-                if "site_id" in sig.parameters:
-                    email = client.generate_email(site_id=site_id)
-                else:
-                    email = client.generate_email()
-            else:
-                email = None
-                
+            email = client.generate_email()
             if not email:
                 raise RuntimeError(f"{provider_name} returned an empty email address")
             self._set_active_client(client, provider_name)
@@ -623,36 +532,37 @@ class EmailnatorClient:
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
 
+    def _fallback_client(self):
+        return EmailMuxClient(proxy_url=self.proxy_url, allow_proxy_fallback=self.allow_proxy_fallback)
+
     @staticmethod
     def _is_forbidden_error(ex: Exception) -> bool:
         if isinstance(ex, requests.exceptions.HTTPError):
             response = getattr(ex, "response", None)
-            if response is not None and response.status_code in (401, 403):
+            if response is not None and response.status_code == 403:
                 return True
         text = str(ex).lower()
-        return any(err in text for err in ("401", "403", "forbidden", "unauthorized"))
+        return "403" in text and "forbidden" in text
 
     def _recovery_candidates(self):
-        # We now prioritize Gmail as it is 100% reliable
-        gmail_factory = lambda: GmailIMAPClient(
-            proxy_url=self.proxy_url,
-            allow_proxy_fallback=self.allow_proxy_fallback,
-        )
-        manual_factory = lambda: ManualEmailnatorClient(
-            proxy_url=self.proxy_url,
-            allow_proxy_fallback=self.allow_proxy_fallback,
-        )
         legacy_factory = lambda: LegacyEmailnatorClient(
             proxy_url=self.proxy_url,
             allow_proxy_fallback=self.allow_proxy_fallback,
         )
-        
-        return [
-            ("gmail_imap", gmail_factory),
-            ("manual_emailnator", manual_factory),
-            ("bypassed_emailnator", self._bypassed_emailnator_client),
-            ("legacy_emailnator", legacy_factory)
-        ]
+        provider_map = {
+            "legacy_emailnator": [
+                ("bypassed_emailnator", self._bypassed_emailnator_client),
+                ("legacy_emailnator", legacy_factory),
+            ],
+            "bypassed_emailnator": [
+                ("bypassed_emailnator", self._bypassed_emailnator_client),
+                ("legacy_emailnator", legacy_factory),
+            ],
+            "emailmux_fallback": [
+                ("emailmux_fallback", self._fallback_client),
+            ],
+        }
+        return provider_map.get(self._provider_name, [])
 
     def _recover_inbox_client(self, email: str) -> bool:
         previous_provider = self._provider_name
@@ -661,6 +571,8 @@ class EmailnatorClient:
             client = None
             try:
                 client = factory()
+                if hasattr(client, "_ensure_email_active"):
+                    client._ensure_email_active(email, force=True)
                 self._set_active_client(client, provider_name)
                 logger.info("Recovered inbox client for %s: %s -> %s", email, previous_provider, provider_name)
                 return True
@@ -677,56 +589,49 @@ class EmailnatorClient:
         self._provider_name = previous_provider
         return False
 
-    def generate_email(self, site_id=None):
+    def generate_email(self):
+        import os
+        # If SKIP_BROWSER_BYPASS=1 (e.g. on Render free tier to avoid OOM),
+        # skip Camoufox entirely and go straight to EmailMuxClient.
+        skip_browser = os.getenv("SKIP_BROWSER_BYPASS", "").strip() in ("1", "true", "yes")
         self.close()
 
-        # 1. Try Gmail IMAP first - It is now the primary method as per user request
-        email, gmail_error = self._attempt_generate(
-            "gmail_imap",
-            lambda: GmailIMAPClient(
-                proxy_url=self.proxy_url,
-                allow_proxy_fallback=self.allow_proxy_fallback,
-            ),
-            site_id=site_id
-        )
-        if email:
-            return email
+        legacy_error = None
+        bypass_error = None
 
-        # 2. Try Manual Cookies
-        if os.path.exists("manual_emailnator_cookies.json"):
-            email, manual_error = self._attempt_generate(
-                "manual_emailnator",
-                lambda: ManualEmailnatorClient(
+        if not skip_browser:
+            email, legacy_error = self._attempt_generate(
+                "legacy_emailnator",
+                lambda: LegacyEmailnatorClient(
                     proxy_url=self.proxy_url,
                     allow_proxy_fallback=self.allow_proxy_fallback,
                 ),
-                site_id=site_id
             )
             if email:
                 return email
 
-        # 3. Try Bypassed Emailnator (Camoufox)
-        email, bypass_error = self._attempt_generate(
-            "bypassed_emailnator",
-            self._bypassed_emailnator_client,
-            site_id=site_id
-        )
-        if email:
-            return email
-        
-        # 4. Try Legacy Emailnator (Direct Requests)
-        email, legacy_error = self._attempt_generate(
-            "legacy_emailnator",
-            lambda: LegacyEmailnatorClient(
-                proxy_url=self.proxy_url,
-                allow_proxy_fallback=self.allow_proxy_fallback,
-            ),
-            site_id=site_id
-        )
+            email, bypass_error = self._attempt_generate(
+                "bypassed_emailnator",
+                self._bypassed_emailnator_client,
+            )
+            if email:
+                return email
+        else:
+            # Skip legacy + browser bypass, log why
+            legacy_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
+            bypass_error = RuntimeError("Skipped (SKIP_BROWSER_BYPASS=1)")
+
+        email, fallback_error = self._attempt_generate("emailmux_fallback", self._fallback_client)
         if email:
             return email
 
-        raise RuntimeError(f"All email sources failed. Gmail: {gmail_error}; Bypass: {bypass_error}; Legacy: {legacy_error}")
+        if legacy_error or bypass_error:
+            raise RuntimeError(
+                f"Legacy Emailnator failed: {legacy_error}; "
+                f"Bypassed Emailnator failed: {bypass_error}; "
+                f"EmailMux fallback failed: {fallback_error}"
+            ) from fallback_error
+        raise fallback_error
 
     def get_messages(self, email):
         if not self._active_client:
@@ -762,56 +667,111 @@ DOMAIN_CURRENCY_MAP = {
 }
 
 
-class DeepEarnClient:
+class DeepEarnClientGmail:
+    def __init__(self, inviter_code, proxy_url, domain):
+        self.inviter_code = inviter_code
+        self.domain = domain
+        self.base_url = f"https://{domain}"
+        self.session = requests.Session()
+        self.session.trust_env = False
+        if proxy_url:
+            p = normalize_proxy_url(proxy_url)
+            self.session.proxies = {"http": p, "https": p}
+        
+        self.uid = str(int(time.time()*1000)) + "".join(random.choices(string.ascii_letters+string.digits, k=34))
+        self.headers = {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "Device-Type": "android",
+            "Anonymous-Uid": self.uid,
+            "Version": "13.5.1",
+            "User-Agent": "Mozilla/5.0"
+        }
+
+    def _post(self, path, data):
+        for attempt in range(3):
+            try:
+                timestamp = str(int(time.time()*1000))
+                sorted_keys = sorted(data.keys())
+                payload_str = "&" + "&".join([f"{k}={data[k]}" for k in sorted_keys if data[k] not in (None, "")]) if sorted_keys else ""
+                signature = hashlib.md5(f"{path}#{self.uid}#{timestamp}#{payload_str}".encode()).hexdigest()
+                
+                h = self.headers.copy()
+                h.update({"Request-Time": timestamp, "X-Sign": signature})
+                
+                resp = self.session.post(f"{self.base_url}{path}", json=data, headers=h, timeout=20)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(1)
+                    continue
+                raise
+
+    def send_otp(self, email):
+        return self._post("/api/v1/member/email/get?version=13.5.1", {"email": email, "cf_token": "", "cf_key": "0x4AAAAAABHJvPhqTR_a9Mwu"})
+
+    def register(self, email, password, otp):
+        return self._post("/api/v1/member/reg?version=13.5.1", {
+            "currency": "India", # Default for Gmail logic in PC tool
+            "email": email,
+            "password": password,
+            "password_confirm": password,
+            "inviter_invite_code": self.inviter_code,
+            "cf_token": "",
+            "cf_key": "0x4AAAAAABHJvPhqTR_a9Mwu",
+            "code": otp
+        })
+
+    def login(self, email, password):
+        resp = self._post("/api/v1/member/login?version=13.5.1", {"account": email, "password": password, "cf_token": "", "cf_key": "0x4AAAAAABHJvPhqTR_a9Mwu"})
+        if resp.get("code") == 200 and resp.get("data", {}).get("token"):
+            self.session.headers["Authorization"] = f"Bearer {resp['data']['token']}"
+        return resp
+
+    def get_info(self):
+        return self._post("/api/v1/member/info?version=13.5.1", {})
+
+    def close(self):
+        try:
+            self.session.close()
+        except:
+            pass
+
+class DeepEarnClientEmailnator:
     def __init__(self, inviter_code="57146564", proxy_url=None, domain="s1.ug5d.com", allow_proxy_fallback=True):
         self.inviter_code = inviter_code
         self.domain = domain
         self.base_url = f"https://{domain}"
         self.currency = DOMAIN_CURRENCY_MAP.get((domain or "").strip().lower(), "India")
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.allow_proxy_fallback = allow_proxy_fallback
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
-        
-        if curl_requests:
-            # Use http_version=1 to avoid 'Proxy CONNECT aborted' errors
-            self.session = curl_requests.Session(impersonate="chrome110", http_version=1)
-        else:
-            self.session = requests.Session()
-            self.session.trust_env = False
-
-        self.allow_proxy_fallback = allow_proxy_fallback
-        if self.using_proxy:
+        if self.proxy_url:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         # Each client instance gets its own unique anon_uid — sessions are fully isolated
         import uuid as _uuid
         ts = int(time.time() * 1000)
-        rand = _uuid.uuid4().hex
+        rand = ''.join(random.choices(string.ascii_letters + string.digits, k=24))
         self.anon_uid = f"{ts}{rand}"
         self.signer = DeepEarnSigner(anon_uid=self.anon_uid)
-        
-        # Determine version based on domain
         self.version = "13.5.1"
-        clean_domain = (domain or "").strip().lower()
-        if clean_domain.startswith("p1."):
-            self.version = "13.1.1" # Pakistan uses older version
-            
         self.default_headers = {
             "Accept": "*/*",
             "Content-Type": "application/json;charset=UTF-8",
             "Device-Type": "android",
-            "Device-Model": random.choice(["Pixel 6", "Pixel 7", "SM-S901B", "SM-G991B", "OnePlus 10", "Redmi Note 11", "Vivo V23"]),
-            "Language": random.choice(["en", "en-US", "en-GB"]),
+            "Device-Model": "Pixel 6",
+            "Language": "en",
             "Anonymous-Uid": self.anon_uid,
-            "User-Language": random.choice(["en", "en-US"]),
-            "Network-Type": random.choice(["wifi", "4g", "5g"]),
+            "User-Language": "en",
+            "Network-Type": "unknown",
             "Version": self.version,
-            "User-Agent": random.choice([
-                "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 12; Redmi Note 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36"
-            ]),
-            "X-Requested-With": "com.deepearn.app",
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 12; Pixel 6 Build/SQ3A.220705.004) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36"
+            ),
         }
 
     @staticmethod
@@ -835,68 +795,26 @@ class DeepEarnClient:
             f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25
         )
 
-    def _rotate_device_fingerprint(self):
-        """Generates a brand new device identity for retries."""
-        import uuid as _uuid
-        ts = int(time.time() * 1000)
-        rand = _uuid.uuid4().hex
-        self.anon_uid = f"{ts}{rand}"
-        self.signer = DeepEarnSigner(anon_uid=self.anon_uid)
-        
-        self.default_headers.update({
-            "Device-Model": random.choice(["Pixel 6", "Pixel 7", "SM-S901B", "SM-G991B", "OnePlus 10", "Redmi Note 11", "Vivo V23", "Pixel 8", "SM-S918B"]),
-            "Language": random.choice(["en", "en-US", "en-GB", "en-PK", "en-IN"]),
-            "Anonymous-Uid": self.anon_uid,
-            "Network-Type": random.choice(["wifi", "4g", "5g"]),
-            "User-Agent": random.choice([
-                "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 12; Redmi Note 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
-                "Mozilla/5.0 (Linux; Android 13; OnePlus 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
-            ]),
-        })
-
     def _post(self, path, data):
-        last_error = None
-        for attempt in range(5): # Increased retries
+        try:
+            resp = self._request_post(path, data)
+            resp.raise_for_status()
             try:
-                if attempt > 0:
-                    # Very short sleep, trusting proxy rotation
-                    time.sleep(random.uniform(1, 3))
+                return resp.json()
+            except ValueError:
+                preview = resp.text[:300].strip()
+                return {"code": -1, "msg": f"Non-JSON response (HTTP {resp.status_code}): {preview}"}
+        except requests.exceptions.RequestException as ex:
+            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+                self._disable_proxy()
                 resp = self._request_post(path, data)
-                if resp.status_code in (403, 429) and attempt < 4:
-                    logger.warning(f"Got {resp.status_code} on attempt {attempt+1}, rotating fingerprint...")
-                    self._rotate_device_fingerprint()
-                    continue
                 resp.raise_for_status()
                 try:
-                    res_json = resp.json()
-                    # Check for business-level rate limits
-                    msg = str(res_json.get("msg") or "").lower()
-                    if "frequent" in msg and attempt < 4:
-                        logger.warning(f"DeepEarn Frequency Block: {msg}. Rotating device identity and retrying...")
-                        self._rotate_device_fingerprint()
-                        time.sleep(2)
-                        continue
-                    return res_json
+                    return resp.json()
                 except ValueError:
                     preview = resp.text[:300].strip()
-                    return {"code": -1, "msg": f"Non-JSON response (HTTP {resp.status_code}): {preview}"}
-            except Exception as ex:
-                last_error = ex
-                if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
-                    self._disable_proxy()
-                    return self._post(path, data)
-                if attempt < 4:
-                    self._rotate_device_fingerprint()
-                    time.sleep(2)
-                    continue
-                raise last_error
-        if last_error:
-            raise last_error
-        return {"code": -1, "msg": "Max retries exceeded"}
+                    return {"code": -1, "msg": f"Non-JSON response after proxy fallback (HTTP {resp.status_code}): {preview}"}
+            raise
 
     def prepare_headers(self, path, data):
         timestamp = str(int(time.time() * 1000))
