@@ -493,7 +493,11 @@ class DeepEarnClientGmail:
         if self.proxy_url:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         
-        self.uid = str(int(time.time()*1000)) + "".join(random.choices(string.ascii_letters+string.digits, k=34))
+        # Super unique UID generation
+        ts = int(time.time() * 1000)
+        rand_part = "".join(random.choices(string.ascii_letters + string.digits, k=34))
+        self.uid = f"{ts}{rand_part}"
+        
         self.headers = {
             "Accept": "*/*",
             "Content-Type": "application/json",

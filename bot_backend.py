@@ -277,13 +277,14 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 return email
             except Exception as e:
                 last_error = str(e)
+                # Ensure we don't leak URLs in logs
                 last_error = re.sub(r"https?://[^\s<]+", "<hidden_url>", last_error)
-                if "ProxyError" in last_error or "Remote end closed" in last_error:
-                    last_error = f"{current_step}: Proxy connection dropped."
-                elif "proxy" in last_error.lower() and "dropped" in last_error.lower():
-                    last_error = f"{current_step}: Proxy connection dropped."
-                else:
-                    last_error = f"{current_step}: {last_error}"
+                
+                if "very frequent" in last_error.lower():
+                    wait_time = random.uniform(5, 10)
+                    logger.warning(f"Rate limited (very frequent). Sleeping {wait_time:.2f}s before retry.")
+                    time.sleep(wait_time)
+                
                 logger.warning("Account creation attempt %s failed: %s", attempt + 1, last_error)
                 time.sleep(2)
             finally:
