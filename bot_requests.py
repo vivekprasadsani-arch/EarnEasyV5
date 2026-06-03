@@ -799,9 +799,6 @@ class DeepEarnClient:
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
         
-        # We'll use standard requests here because curl_cffi on some Windows systems
-        # has issues with SSL verification even with verify=False.
-        # DeepEarn API is generally less sensitive to impersonation than Emailnator.
         self.session = requests.Session()
         self.session.verify = False
         self.session.trust_env = False
@@ -809,18 +806,17 @@ class DeepEarnClient:
         self.allow_proxy_fallback = allow_proxy_fallback
         if self.using_proxy:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
-        # Each client instance gets its own unique anon_uid — sessions are fully isolated
+
+        # Use standard 32-char hex for anon_uid
         import uuid as _uuid
-        ts = int(time.time() * 1000)
-        rand = _uuid.uuid4().hex
-        self.anon_uid = f"{ts}{rand}"
+        self.anon_uid = _uuid.uuid4().hex
         self.signer = DeepEarnSigner(anon_uid=self.anon_uid)
         
         # Determine version based on domain
         self.version = "13.5.1"
         clean_domain = (domain or "").strip().lower()
         if clean_domain.startswith("p1."):
-            self.version = "13.1.1" # Pakistan uses older version
+            self.version = "13.1.1" 
             
         self.default_headers = {
             "Accept": "*/*",

@@ -36,7 +36,10 @@ def _close_quietly(client):
         pass
 
 
-def _extract_otp(msgs_content):
+import email.utils
+from datetime import datetime, timezone
+
+def _extract_otp(msgs_content, start_time_ts=None):
     patterns = (
         r">\s*(\d{6})\s*<",
         r"\bcode\b[^0-9]{0,20}(\d{6})\b",
@@ -61,13 +64,7 @@ def _extract_otp(msgs_content):
                 return match.group(1)
     return None
 
-
-def _get_sticky_proxy(proxy_url):
-    """Returns the original proxy URL. Session-based stickiness disabled due to 407 errors."""
-    return proxy_url
-
-
-def _message_candidates(messages):
+def _message_candidates(messages, start_time_ts=None):
     candidates = [
         message
         for message in (messages or [])
@@ -81,9 +78,9 @@ def _message_candidates(messages):
         for message in candidates
         if any(hint in str(message.get("subject", "")).lower() for hint in OTP_SUBJECT_HINTS)
     ]
-    selected = prioritized or candidates
-    return sorted(
-        selected,
+    
+    sorted_msgs = sorted(
+        prioritized or candidates,
         key=lambda message: str(
             message.get("createdAt")
             or message.get("created_at")
@@ -95,6 +92,25 @@ def _message_candidates(messages):
         ),
         reverse=True,
     )
+    
+    # Filter by date to ensure we pick a NEW code
+    if start_time_ts:
+        filtered = []
+        for m in sorted_msgs:
+            date_str = m.get("receivedAt")
+            if date_str:
+                try:
+                    dt = email.utils.parsedate_to_datetime(date_str)
+                    # Use a 60s grace period for server clock drift
+                    if dt.timestamp() >= start_time_ts - 60:
+                        filtered.append(m)
+                except:
+                    filtered.append(m)
+            else:
+                filtered.append(m)
+        return filtered
+        
+    return sorted_msgs
 
 
 def generate_qr_image(url: str, client: WaLinkClient = None) -> bytes:
@@ -166,6 +182,7 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
             email_client = None
             earn_client = None
             email = ""
+            start_time_ts = time.time()
             try:
                 earn_client = DeepEarnClient(
                     inviter_code=invite_code,
@@ -222,12 +239,15 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                             logger.warning("OTP resend failed for %s via %s: %s", email, provider_name, resend_resp)
                         else:
                             logger.info("OTP resent for %s via %s on poll %s", email, provider_name, poll_index)
+                            # Update start time to prioritize NEW codes after resend
+                            start_time_ts = time.time()
 
                     msgs = email_client.get_messages(email)
                     if not msgs:
                         continue
 
-                    for message in _message_candidates(msgs):
+                    # We check latest messages for OTP with timestamp filtering
+                    for message in _message_candidates(msgs, start_time_ts=start_time_ts):
                         otp = _extract_otp([
                             message.get("subject"),
                             message.get("text"),
