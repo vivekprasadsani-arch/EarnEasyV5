@@ -352,9 +352,9 @@ async def generate_wa_qr(site_id: str, email: str, password: str, proxy: str = N
                 return client, device_id, invite_code, qr_bytes
             except Exception as e:
                 last_error = str(e)
+                # Ensure we don't leak URLs in logs
                 last_error = re.sub(r"https?://[^\s<]+", "<hidden_url>", last_error)
-                if "ProxyError" in last_error or "Remote end closed" in last_error:
-                    last_error = "Proxy connection dropped."
+                logger.warning(f"QR Generation attempt {attempt + 1} failed: {last_error}")
                 _close_quietly(client)
                 time.sleep(2)
 

@@ -142,8 +142,10 @@ class WaLinkClient:
                 return resp.json()
             except ValueError:
                 return {"code": -1, "msg": f"Invalid JSON response (len {len(resp.text)}). Status: {resp.status_code}"}
-        except requests.exceptions.RequestException as ex:
-            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+        except Exception as ex:
+            # Aggressive Fallback: If any error occurs while using a proxy, try once without it.
+            if self.using_proxy and self.allow_proxy_fallback:
+                logger.info(f"Request failed with proxy, retrying without proxy. Error: {ex}")
                 self._disable_proxy()
                 try:
                     resp = self._request_post(path, data)
@@ -152,7 +154,7 @@ class WaLinkClient:
                         return resp.json()
                     except ValueError:
                         return {"code": -1, "msg": f"Invalid JSON response (fallback). Status: {resp.status_code}"}
-                except requests.exceptions.RequestException as fallback_ex:
+                except Exception as fallback_ex:
                     raise RuntimeError(self._mask_error(fallback_ex))
             raise RuntimeError(self._mask_error(ex))
 

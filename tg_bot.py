@@ -541,7 +541,7 @@ async def ask_invite_code(cq: CallbackQuery, state: FSMContext):
     msg = await cq.message.answer("📝 Please enter your Invite Code:", reply_markup=ForceReply())
     await state.update_data(prompt_msg_id=msg.message_id) # Save for cleanup later
     await state.set_state(BotStates.waiting_for_invite)
-    await cq.message.delete()
+    await safe_delete_message(cq.message)
     await safe_answer_callback(cq)
 
 @router.message(BotStates.waiting_for_invite)
