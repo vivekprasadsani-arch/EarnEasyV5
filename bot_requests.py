@@ -518,7 +518,8 @@ class GmailIMAPClient:
 
     def get_messages(self, email_addr):
         """Polls Inbox and Spam for messages sent to the specific alias."""
-        folders = ["INBOX", '"[Gmail]/Spam"']
+        # Check multiple possible Spam folder names to handle different Gmail locales/settings
+        folders = ["INBOX", '"[Gmail]/Spam"', "Spam", '"[Gmail]/All Mail"']
         messages_found = []
         
         try:
@@ -528,12 +529,17 @@ class GmailIMAPClient:
             for folder in folders:
                 try:
                     status, _ = mail.select(folder, readonly=True)
-                    if status != 'OK': continue
+                    if status != 'OK': 
+                        continue
                     
+                    # Search for UNSEEN or just ALL (we filter by timestamp anyway)
                     status, messages = mail.search(None, 'ALL')
                     mail_ids = messages[0].split()
                     
-                    # Check latest 15 messages
+                    if not mail_ids:
+                        continue
+
+                    # Check latest 15 messages in each folder
                     for m_id in reversed(mail_ids[-15:]):
                         status, data = mail.fetch(m_id, "(RFC822)")
                         for response_part in data:
@@ -545,11 +551,12 @@ class GmailIMAPClient:
                                 if email_addr.lower() not in to_header:
                                     continue
                                 
-                                subject, encoding = decode_header(msg["Subject"])[0]
-                                if isinstance(subject, bytes):
-                                    subject = subject.decode(encoding or "utf-8", errors='ignore')
+                                subject_bytes, encoding = decode_header(msg["Subject"])[0]
+                                if isinstance(subject_bytes, bytes):
+                                    subject = subject_bytes.decode(encoding or "utf-8", errors='ignore')
+                                else:
+                                    subject = subject_bytes
                                 
-                                # Format matching Emailnator output for compatibility
                                 messages_found.append({
                                     "messageID": m_id.decode(),
                                     "subject": subject,
@@ -557,7 +564,8 @@ class GmailIMAPClient:
                                     "to": to_header,
                                     "receivedAt": msg.get("Date")
                                 })
-                except:
+                except Exception as e:
+                    logger.debug(f"Error checking folder {folder}: {e}")
                     continue
             
             mail.logout()
