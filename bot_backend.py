@@ -63,28 +63,43 @@ def _extract_otp(msgs_content):
 
 
 def _get_sticky_proxy(proxy_url):
-    """Appends a unique session ID to proxy credentials if possible to ensure stickiness."""
-    if not proxy_url or "@" not in proxy_url:
+    """Appends a unique session ID to proxy credentials to ensure IP stickiness for the registration flow."""
+    if not proxy_url:
         return proxy_url
     
     try:
-        # Expected format: http://user:pass@host:port
+        from urllib.parse import urlparse, urlunparse
         import uuid
-        session_id = uuid.uuid4().hex[:8]
-        prefix, rest = proxy_url.split("@", 1)
         
-        if ":" in prefix:
-            # http://user:pass -> http://user-session-abc123:pass
-            # This is a standard way to get sticky IPs in residential proxy providers
-            parts = prefix.split(":")
-            if len(parts) >= 2:
-                # Check if it already has a session
-                if "-session-" not in parts[-2]:
-                    parts[-2] += f"-session-{session_id}"
-                return ":".join(parts) + "@" + rest
-    except Exception:
-        pass
-    return proxy_url
+        parsed = urlparse(proxy_url)
+        # Only apply if there's a username to append the session ID to
+        if not parsed.username:
+            return proxy_url
+            
+        session_id = uuid.uuid4().hex[:6]
+        user = parsed.username
+        
+        # Avoid double-session IDs
+        if "-session-" not in user:
+            user = f"{user}-session-{session_id}"
+            
+        # Carefully reconstruct the netloc (user:pass@host:port)
+        new_netloc = user
+        if parsed.password:
+            new_netloc += f":{parsed.password}"
+        
+        if parsed.hostname:
+            new_netloc += f"@{parsed.hostname}"
+            if parsed.port:
+                new_netloc += f":{parsed.port}"
+        else:
+            # Handle cases where hostname might be missing or netloc is non-standard
+            return proxy_url
+            
+        return urlunparse(parsed._replace(netloc=new_netloc))
+    except Exception as e:
+        logger.debug(f"Failed to generate sticky proxy: {e}")
+        return proxy_url
 
 
 def _message_candidates(messages):
@@ -191,7 +206,7 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                     inviter_code=invite_code,
                     proxy_url=sticky_proxy,
                     domain=domain,
-                    allow_proxy_fallback=False, # We MUST use the sticky proxy
+                    allow_proxy_fallback=True, # Allow fallback to direct if proxy fails
                 )
 
                 current_step = "email generation"
