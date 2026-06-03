@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F, Router
