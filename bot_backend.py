@@ -212,7 +212,8 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 poll_count = 5
                 for poll_index in range(poll_count):
                     if poll_index:
-                        time.sleep(OTP_POLL_INTERVAL_SECONDS if use_emailnator else 3)
+                        # Fast polling for Gmail (1s), original 3s for Emailnator
+                        time.sleep(OTP_POLL_INTERVAL_SECONDS if use_emailnator else 1.5)
 
                     if use_emailnator and poll_index in OTP_RESEND_POLLS:
                         resend_resp = earn_client.send_otp(email)

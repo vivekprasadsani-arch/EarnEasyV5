@@ -480,15 +480,17 @@ DOMAIN_CURRENCY_MAP = {
 
 
 class DeepEarnClientGmail:
-    def __init__(self, inviter_code, proxy_url, domain):
+    def __init__(self, inviter_code, proxy_url, domain, allow_proxy_fallback=True):
         self.inviter_code = inviter_code
         self.domain = domain
         self.base_url = f"https://{domain}"
         self.session = requests.Session()
         self.session.trust_env = False
-        if proxy_url:
-            p = normalize_proxy_url(proxy_url)
-            self.session.proxies = {"http": p, "https": p}
+        self.allow_proxy_fallback = allow_proxy_fallback
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.using_proxy = bool(self.proxy_url)
+        if self.proxy_url:
+            self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
         
         self.uid = str(int(time.time()*1000)) + "".join(random.choices(string.ascii_letters+string.digits, k=34))
         self.headers = {
@@ -499,6 +501,22 @@ class DeepEarnClientGmail:
             "Version": "13.5.1",
             "User-Agent": "Mozilla/5.0"
         }
+
+    @staticmethod
+    def is_proxy_error(ex: Exception) -> bool:
+        if isinstance(ex, requests.exceptions.ProxyError):
+            return True
+        text = str(ex).lower()
+        return (
+            "proxy" in text
+            or "407" in text
+            or "remote end closed" in text
+            or "tunnel connection failed" in text
+        )
+
+    def _disable_proxy(self):
+        self.session.proxies.clear()
+        self.using_proxy = False
 
     def _post(self, path, data):
         for attempt in range(3):
@@ -515,6 +533,10 @@ class DeepEarnClientGmail:
                 resp.raise_for_status()
                 return resp.json()
             except Exception as e:
+                if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(e):
+                    logger.info("Proxy error detected in DeepEarnClientGmail, disabling proxy fallback.")
+                    self._disable_proxy()
+                    return self._post(path, data)
                 if attempt < 2:
                     time.sleep(1)
                     continue
