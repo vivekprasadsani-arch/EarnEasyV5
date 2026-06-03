@@ -295,20 +295,31 @@ async def prompt_add_gmail(cq: CallbackQuery, state: FSMContext):
     await state.set_state("waiting_for_gmail_info")
     await cq.answer()
 
-@router.message(F.text, F.state == "waiting_for_gmail_info")
+@router.message(BotStates.waiting_for_gmail_info)
 async def process_add_gmail(message: Message, state: FSMContext):
     if message.from_user.id != config.ADMIN_USER_ID:
         return
     
     try:
-        email, pwd = [x.strip() for x in message.text.split(",")]
+        text = message.text
+        if "," not in text:
+            raise ValueError("Missing comma")
+            
+        parts = [x.strip() for x in text.split(",")]
+        if len(parts) < 2:
+            raise ValueError("Insufficient parts")
+            
+        email, pwd = parts[0], parts[1]
+        if "@gmail.com" not in email.lower():
+            await message.answer("❌ Only `@gmail.com` accounts are supported.")
+            return
+
         await db.add_gmail(email, pwd)
         await message.answer(f"✅ Added `{email}` successfully!", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Invalid format. Use: `email@gmail.com, app_password`", parse_mode="Markdown")
-    
-    await state.clear()
-    await show_settings(message)
+        await state.clear()
+        await show_settings(message)
+    except Exception as e:
+        await message.answer("❌ Invalid format. Please send exactly like this:\n`email@gmail.com, app_password`", parse_mode="Markdown")
 
 @router.callback_query(F.data == "list_remove_gmail")
 async def list_remove_gmail(cq: CallbackQuery):
