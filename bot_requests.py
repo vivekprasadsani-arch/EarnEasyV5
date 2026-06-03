@@ -688,4 +688,3 @@ class DeepEarnClientEmailnator:
 
 def generate_pwd(length=8):
     return "".join(random.choices(string.digits, k=length))
- "".join(random.choices(string.digits, k=length))
