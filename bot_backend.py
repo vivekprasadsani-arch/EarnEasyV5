@@ -63,43 +63,24 @@ def _extract_otp(msgs_content):
 
 
 def _get_sticky_proxy(proxy_url):
-    """Appends a unique session ID to proxy credentials to ensure IP stickiness for the registration flow."""
-    if not proxy_url:
+    """safely injects a session ID into proxy credentials for IP stickiness."""
+    if not proxy_url or "@" not in proxy_url or "-session-" in proxy_url:
         return proxy_url
     
     try:
-        from urllib.parse import urlparse, urlunparse
+        import re
         import uuid
-        
-        parsed = urlparse(proxy_url)
-        # Only apply if there's a username to append the session ID to
-        if not parsed.username:
-            return proxy_url
-            
         session_id = uuid.uuid4().hex[:6]
-        user = parsed.username
         
-        # Avoid double-session IDs
-        if "-session-" not in user:
-            user = f"{user}-session-{session_id}"
-            
-        # Carefully reconstruct the netloc (user:pass@host:port)
-        new_netloc = user
-        if parsed.password:
-            new_netloc += f":{parsed.password}"
-        
-        if parsed.hostname:
-            new_netloc += f"@{parsed.hostname}"
-            if parsed.port:
-                new_netloc += f":{parsed.port}"
-        else:
-            # Handle cases where hostname might be missing or netloc is non-standard
-            return proxy_url
-            
-        return urlunparse(parsed._replace(netloc=new_netloc))
-    except Exception as e:
-        logger.debug(f"Failed to generate sticky proxy: {e}")
-        return proxy_url
+        # Regex to find the username part in http://user:pass@host:port
+        # Pattern: scheme:// (username) [:password] @ host
+        match = re.match(r'^(https?://)([^:@]+)(.*@.*)$', proxy_url)
+        if match:
+            scheme, user, rest = match.groups()
+            return f"{scheme}{user}-session-{session_id}{rest}"
+    except Exception:
+        pass
+    return proxy_url
 
 
 def _message_candidates(messages):
