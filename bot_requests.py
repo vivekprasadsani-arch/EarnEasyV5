@@ -558,7 +558,7 @@ class GmailIMAPClient:
                                     subject = subject_bytes
                                 
                                 messages_found.append({
-                                    "messageID": m_id.decode(),
+                                    "messageID": f"{folder}:{m_id.decode()}",
                                     "subject": subject,
                                     "from": msg.get("From"),
                                     "to": to_header,
@@ -575,27 +575,27 @@ class GmailIMAPClient:
         return messages_found
 
     def get_message_content(self, email_addr, message_id):
-        """Retrieves raw content of a specific message via IMAP."""
-        folders = ["INBOX", '"[Gmail]/Spam"']
+        """Retrieves raw content of a specific message via IMAP using folder-prefixed ID."""
         try:
+            folder = "INBOX"
+            m_id = str(message_id)
+            if ":" in m_id:
+                folder, m_id = m_id.split(":", 1)
+                
             mail = imaplib.IMAP4_SSL("imap.gmail.com")
             mail.login(self.gmail_user, self.gmail_pass)
             
-            for folder in folders:
-                try:
-                    mail.select(folder, readonly=True)
-                    status, data = mail.fetch(str(message_id).encode(), "(RFC822)")
-                    for response_part in data:
-                        if isinstance(response_part, tuple):
-                            msg = email.message_from_bytes(response_part[1])
-                            if msg.is_multipart():
-                                for part in msg.walk():
-                                    if part.get_content_type() == "text/html":
-                                        return part.get_payload(decode=True).decode(errors='ignore')
-                            else:
-                                return msg.get_payload(decode=True).decode(errors='ignore')
-                except:
-                    continue
+            mail.select(folder, readonly=True)
+            status, data = mail.fetch(m_id.encode(), "(RFC822)")
+            for response_part in data:
+                if isinstance(response_part, tuple):
+                    msg = email.message_from_bytes(response_part[1])
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/html":
+                                return part.get_payload(decode=True).decode(errors='ignore')
+                    else:
+                        return msg.get_payload(decode=True).decode(errors='ignore')
             mail.logout()
         except Exception as e:
             logger.error(f"Gmail Content Error: {e}")
