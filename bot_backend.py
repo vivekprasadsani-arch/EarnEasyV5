@@ -63,23 +63,7 @@ def _extract_otp(msgs_content):
 
 
 def _get_sticky_proxy(proxy_url):
-    """safely injects a session ID into proxy credentials for IP stickiness."""
-    if not proxy_url or "@" not in proxy_url or "-session-" in proxy_url:
-        return proxy_url
-    
-    try:
-        import re
-        import uuid
-        session_id = uuid.uuid4().hex[:6]
-        
-        # Regex to find the username part in http://user:pass@host:port
-        # Pattern: scheme:// (username) [:password] @ host
-        match = re.match(r'^(https?://)([^:@]+)(.*@.*)$', proxy_url)
-        if match:
-            scheme, user, rest = match.groups()
-            return f"{scheme}{user}-session-{session_id}{rest}"
-    except Exception:
-        pass
+    """Returns the original proxy URL. Session-based stickiness disabled due to 407 errors."""
     return proxy_url
 
 
