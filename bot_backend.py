@@ -36,30 +36,55 @@ def _close_quietly(client):
         pass
 
 
-def _extract_otp(*sources):
+def _extract_otp(msgs_content):
     patterns = (
         r">\s*(\d{6})\s*<",
         r"\bcode\b[^0-9]{0,20}(\d{6})\b",
         r"\botp\b[^0-9]{0,20}(\d{6})\b",
         r"\b(\d{6})\b",
     )
-    for source in sources:
-        if not source:
+    for content in msgs_content:
+        if not content:
             continue
-        # 1. Try patterns on RAW source (works best for HTML like <b>123456</b>)
+        # 1. Try patterns on RAW source
         for pattern in patterns:
-            match = re.search(pattern, str(source), re.IGNORECASE | re.DOTALL)
+            match = re.search(pattern, str(content), re.IGNORECASE | re.DOTALL)
             if match:
                 return match.group(1)
                 
-        # 2. Try patterns on normalized source (stripped of tags)
-        normalized = re.sub(r"<[^>]+>", " ", str(source))
+        # 2. Try patterns on normalized source
+        normalized = re.sub(r"<[^>]+>", " ", str(content))
         normalized = re.sub(r"\s+", " ", normalized)
         for pattern in patterns:
             match = re.search(pattern, normalized, re.IGNORECASE | re.DOTALL)
             if match:
                 return match.group(1)
     return None
+
+
+def _get_sticky_proxy(proxy_url):
+    """Appends a unique session ID to proxy credentials if possible to ensure stickiness."""
+    if not proxy_url or "@" not in proxy_url:
+        return proxy_url
+    
+    try:
+        # Expected format: http://user:pass@host:port
+        import uuid
+        session_id = uuid.uuid4().hex[:8]
+        prefix, rest = proxy_url.split("@", 1)
+        
+        if ":" in prefix:
+            # http://user:pass -> http://user-session-abc123:pass
+            # This is a standard way to get sticky IPs in residential proxy providers
+            parts = prefix.split(":")
+            if len(parts) >= 2:
+                # Check if it already has a session
+                if "-session-" not in parts[-2]:
+                    parts[-2] += f"-session-{session_id}"
+                return ":".join(parts) + "@" + rest
+    except Exception:
+        pass
+    return proxy_url
 
 
 def _message_candidates(messages):
@@ -151,6 +176,9 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
     if not domain:
         raise ValueError(f"Unknown site: {site_id}")
 
+    # Use a unique sticky proxy for this specific account creation thread
+    sticky_proxy = _get_sticky_proxy(proxy)
+
     def _sync_create():
         last_error = ""
         current_step = "starting"
@@ -161,15 +189,15 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
             try:
                 earn_client = DeepEarnClient(
                     inviter_code=invite_code,
-                    proxy_url=proxy,
+                    proxy_url=sticky_proxy,
                     domain=domain,
-                    allow_proxy_fallback=True,
+                    allow_proxy_fallback=False, # We MUST use the sticky proxy
                 )
 
                 current_step = "email generation"
                 for email_try in range(MAX_EMAIL_CANDIDATES_PER_ATTEMPT):
                     _close_quietly(email_client)
-                    email_client = EmailnatorClient(proxy_url=proxy, allow_proxy_fallback=True)
+                    email_client = EmailnatorClient(proxy_url=sticky_proxy, allow_proxy_fallback=True)
                     email = email_client.generate_email(site_id=site_id)
                     if not email:
                         raise RuntimeError("Failed to generate email")
@@ -188,6 +216,10 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                         )
                         current_step = "email generation"
                         continue
+                    
+                    if "frequent" in otp_error.lower():
+                        logger.warning(f"IP/Email Blocked: {otp_error}. Retrying with new identity...")
+                        raise RuntimeError(f"DeepEarn frequency block: {otp_error}")
 
                     raise RuntimeError(f"OTP send failed: {otp_error or 'unknown error'}")
                 else:
@@ -216,12 +248,12 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                         continue
 
                     for message in _message_candidates(msgs):
-                        otp = _extract_otp(
+                        otp = _extract_otp([
                             message.get("subject"),
                             message.get("text"),
                             message.get("preview"),
                             message.get("snippet"),
-                        )
+                        ])
                         if otp:
                             break
 
@@ -231,16 +263,10 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
 
                         try:
                             content = email_client.get_message_content(email, message_id)
-                        except Exception as content_error:
-                            logger.warning(
-                                "OTP content fetch failed for %s via %s: %s",
-                                message_id,
-                                provider_name,
-                                content_error,
-                            )
+                        except Exception:
                             continue
 
-                        otp = _extract_otp(content)
+                        otp = _extract_otp([content])
                         if otp:
                             break
 
@@ -255,10 +281,11 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
 
                 current_step = "registration"
                 # Small sleep to ensure backend is ready for the code
-                time.sleep(2)
+                time.sleep(3)
                 reg_resp = earn_client.register(email, password, otp)
                 if reg_resp.get("code") != 200:
-                    raise RuntimeError(f"Registration failed: {reg_resp.get('msg')}")
+                    reg_msg = str(reg_resp.get('msg') or "unknown")
+                    raise RuntimeError(f"Registration failed: {reg_msg}")
 
                 return email
             except Exception as e:
@@ -283,13 +310,14 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
 
 async def generate_wa_qr(site_id: str, email: str, password: str, proxy: str = None):
     domain = SITES.get(site_id)
+    sticky_proxy = _get_sticky_proxy(proxy)
 
     def _sync_qr():
         last_error = ""
         for attempt in range(2):
             client = None
             try:
-                client = WaLinkClient(domain=domain, proxy_url=proxy, allow_proxy_fallback=True)
+                client = WaLinkClient(domain=domain, proxy_url=sticky_proxy, allow_proxy_fallback=True)
                 login_res = client.login(email, password)
                 if login_res.get("code") != 200:
                     raise RuntimeError(f"Login failed: {login_res.get('msg')}")

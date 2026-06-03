@@ -892,37 +892,36 @@ class DeepEarnClient:
 
     def _post(self, path, data):
         last_error = None
-        for attempt in range(5): # Increased retries
+        for attempt in range(5):
             try:
                 if attempt > 0:
-                    # Very short sleep, trusting proxy rotation
                     time.sleep(random.uniform(1, 3))
                 resp = self._request_post(path, data)
-                if resp.status_code in (403, 429) and attempt < 4:
-                    logger.warning(f"Got {resp.status_code} on attempt {attempt+1}, rotating fingerprint...")
-                    self._rotate_device_fingerprint()
-                    continue
-                resp.raise_for_status()
+                
+                # Business logic check before raising for status
                 try:
                     res_json = resp.json()
-                    # Check for business-level rate limits
                     msg = str(res_json.get("msg") or "").lower()
+                    
+                    # If we hit a frequency limit, we might need a new proxy session OR fingerprint
+                    # BUT only if we haven't successfully sent an OTP yet.
+                    # For now, we'll let the higher level retry logic handle it.
                     if "frequent" in msg and attempt < 4:
-                        logger.warning(f"DeepEarn Frequency Block: {msg}. Rotating device identity and retrying...")
-                        self._rotate_device_fingerprint()
-                        time.sleep(2)
+                        logger.warning(f"DeepEarn Frequency Block: {msg}. Retrying attempt {attempt+1}...")
+                        time.sleep(3)
                         continue
                     return res_json
                 except ValueError:
-                    preview = resp.text[:300].strip()
-                    return {"code": -1, "msg": f"Non-JSON response (HTTP {resp.status_code}): {preview}"}
+                    pass
+
+                resp.raise_for_status()
+                return resp.json()
             except Exception as ex:
                 last_error = ex
                 if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
-                    self._disable_proxy()
-                    return self._post(path, data)
+                    logger.warning(f"Proxy error in DeepEarnClient: {ex}. Retrying...")
+                    # We don't disable proxy here, just retry. The proxy gateway might rotate IP for us.
                 if attempt < 4:
-                    self._rotate_device_fingerprint()
                     time.sleep(2)
                     continue
                 raise last_error
