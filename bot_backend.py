@@ -113,6 +113,11 @@ def _message_candidates(messages, start_time_ts=None):
     return sorted_msgs
 
 
+def _get_sticky_proxy(proxy_url):
+    """Returns the original proxy URL. Session-based stickiness disabled due to 407 errors."""
+    return proxy_url
+
+
 def generate_qr_image(url: str, client: WaLinkClient = None) -> bytes:
     try:
         resp = None
