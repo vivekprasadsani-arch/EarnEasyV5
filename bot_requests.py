@@ -799,13 +799,12 @@ class DeepEarnClient:
         self.proxy_url = normalize_proxy_url(proxy_url)
         self.using_proxy = bool(self.proxy_url)
         
-        if curl_requests:
-            # Use http_version=1 to avoid 'Proxy CONNECT aborted' errors
-            self.session = curl_requests.Session(impersonate="chrome110", http_version=1, verify=False)
-        else:
-            self.session = requests.Session()
-            self.session.verify = False
-            self.session.trust_env = False
+        # We'll use standard requests here because curl_cffi on some Windows systems
+        # has issues with SSL verification even with verify=False.
+        # DeepEarn API is generally less sensitive to impersonation than Emailnator.
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.trust_env = False
 
         self.allow_proxy_fallback = allow_proxy_fallback
         if self.using_proxy:

@@ -51,9 +51,10 @@ class WaLinkClient:
         
         # Use curl_cffi Session for browser fingerprinting and proxy stability
         if hasattr(requests, "Session") and "impersonate" in str(requests.Session.__init__):
-            self.session = requests.Session(impersonate="chrome110", http_version=1)
+            self.session = requests.Session(impersonate="chrome110", http_version=1, verify=False)
         else:
             self.session = requests.Session()
+            self.session.verify = False
             self.session.trust_env = False
             
         self.using_proxy = bool(self.proxy_url)
