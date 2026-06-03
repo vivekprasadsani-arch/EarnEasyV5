@@ -858,6 +858,10 @@ async def handle_pasted_email(message: Message, state: FSMContext):
         )
 
 async def main():
+    # Increase thread pool size for high concurrency (400-500 users)
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=200))
+    
     await db.init_db()
     await setup_bot_commands()
     dp.include_router(router)
