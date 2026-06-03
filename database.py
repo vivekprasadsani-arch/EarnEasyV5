@@ -93,12 +93,44 @@ async def init_db():
         try:
             _select("users", columns="user_id", limit=1)
             _select("accounts", columns="id", limit=1)
+            # Try to select from gmail_credentials, if it fails, it will catch below
+            try:
+                _select("gmail_credentials", columns="id", limit=1)
+            except:
+                logger.warning("Table 'gmail_credentials' not found. Admin needs to run SQL for it.")
         except Exception as exc:
             raise RuntimeError(
                 "Supabase API is reachable but tables or policies are not ready. Run supabase_schema.sql in Supabase SQL Editor first."
             ) from exc
 
     await asyncio.to_thread(_sync_init)
+
+
+async def add_gmail_credential(email: str, app_password: str):
+    """Add a new Gmail account and App Password to the database."""
+    await asyncio.to_thread(
+        _request,
+        "POST",
+        "gmail_credentials",
+        params={"on_conflict": "email"},
+        json=[
+            {
+                "email": email.strip().lower(),
+                "app_password": app_password.strip(),
+            }
+        ],
+        prefer="resolution=merge-duplicates,return=minimal",
+    )
+
+
+async def get_gmail_credentials():
+    """Retrieve all Gmail credentials stored in the database."""
+    return await asyncio.to_thread(
+        _select,
+        "gmail_credentials",
+        columns="email, app_password",
+        order="created_at.desc",
+    )
 
 
 async def ping():
@@ -172,20 +204,31 @@ async def set_user_proxy(user_id: int, proxy: str):
 
 
 async def add_account(user_id: int, site_id: str, email: str, password: str, invite_code: str):
-    await asyncio.to_thread(
-        _request,
-        "POST",
+    def _sync_add():
+        rows = _request(
+            "POST",
+            "accounts",
+            json=[
+                {
+                    "user_id": int(user_id),
+                    "site_id": site_id,
+                    "email": email,
+                    "password": password,
+                    "invite_code": invite_code,
+                }
+            ],
+            prefer="return=representation",
+        )
+        return rows[0]['id'] if rows else None
+    return await asyncio.to_thread(_sync_add)
+
+
+async def get_account_by_id(account_id: int):
+    """Retrieve a specific account record by its ID."""
+    return await asyncio.to_thread(
+        _fetch_first,
         "accounts",
-        json=[
-            {
-                "user_id": int(user_id),
-                "site_id": site_id,
-                "email": email,
-                "password": password,
-                "invite_code": invite_code,
-            }
-        ],
-        prefer="return=minimal",
+        filters={"id": f"eq.{int(account_id)}"}
     )
 
 
@@ -251,54 +294,17 @@ async def get_latest_account_by_email(user_id: int, email: str):
     )
 
 
-# --- Bot Settings & Gmail Management ---
-
-async def get_bot_setting(key: str, default: str = None):
-    def _sync_get():
-        res = _fetch_first("bot_settings", filters={"key": f"eq.{key}"})
-        return res["value"] if res else default
-    return await asyncio.to_thread(_sync_get)
-
-
-async def set_bot_setting(key: str, value: str):
-    def _sync_set():
-        _request(
-            "POST",
-            "bot_settings",
-            params={"on_conflict": "key"},
-            json=[{"key": key, "value": str(value)}],
-            prefer="resolution=merge-duplicates,return=minimal",
-        )
-    await asyncio.to_thread(_sync_set)
-
-
-async def get_all_gmails():
-    return await asyncio.to_thread(_select, "gmail_accounts")
-
-
-async def add_gmail(email: str, password: str):
-    await asyncio.to_thread(
-        _request,
-        "POST",
-        "gmail_accounts",
-        params={"on_conflict": "email"},
-        json=[{"email": email, "password": password}],
-        prefer="resolution=merge-duplicates,return=minimal",
-    )
-
-
-async def remove_gmail(email: str):
-    await asyncio.to_thread(
-        _request,
-        "DELETE",
-        "gmail_accounts",
-        params={"email": f"eq.{email}"},
-    )
-
-
-async def is_alias_used(email: str, site_id: str):
-    # For checking if a gmail alias was already used for a specific site
+async def is_email_used_on_site(site_id: str, email: str):
+    """Checks if a specific email (alias) has already been successfully linked on a specific site."""
     def _sync_check():
-        res = _fetch_first("accounts", filters={"email": f"eq.{email}", "site_id": f"eq.{site_id}"})
-        return bool(res)
+        target = _fetch_first(
+            "accounts",
+            columns="id",
+            filters={
+                "site_id": f"eq.{site_id}",
+                "email": f"eq.{email}",
+                "is_linked": "eq.true",
+            }
+        )
+        return target is not None
     return await asyncio.to_thread(_sync_check)

@@ -1,10 +1,15 @@
 import hashlib
 import time
 import uuid
-import urllib3
+import logging
 from urllib.parse import urlparse
 
-import requests
+try:
+    from curl_cffi import requests
+except ImportError:
+    import requests
+
+logger = logging.getLogger(__name__)
 
 
 def make_anonymous_uid() -> str:
@@ -24,7 +29,8 @@ class Signer:
 
 class WaLinkClient:
     DOMAIN_VERSION_MAP = {
-        "p1.x7bb.com":   "13.5.1",
+        "p1.x7bb.com":   "13.1.1", # Pakistan uses older version
+        "p1.3dp9.com":   "13.1.1", 
         "s1.n8o9.com":   "13.5.1",
         "s1.4e22.com":   "13.5.1",
         "a1.8xy5.com":   "13.5.1",
@@ -42,11 +48,18 @@ class WaLinkClient:
         self.token = "X"
         self.login_email = ""
         self.login_password = ""
-        self.session = requests.Session()
-        self.session.trust_env = False
+        
+        # Use curl_cffi Session for browser fingerprinting and proxy stability
+        if hasattr(requests, "Session") and "impersonate" in str(requests.Session.__init__):
+            self.session = requests.Session(impersonate="chrome110", http_version=1)
+        else:
+            self.session = requests.Session()
+            self.session.trust_env = False
+            
         self.using_proxy = bool(self.proxy_url)
         if self.using_proxy:
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
+            
         self.default_headers = {
             "Accept": "*/*",
             "Content-Type": "application/json;charset=UTF-8",
@@ -83,10 +96,12 @@ class WaLinkClient:
 
     @staticmethod
     def is_proxy_error(ex: Exception) -> bool:
-        if isinstance(ex, requests.exceptions.ProxyError):
+        # Standard requests errors
+        if "ProxyError" in str(type(ex)):
             return True
+        # curl_cffi errors
         text = str(ex).lower()
-        return "proxy" in text or "407" in text
+        return any(err in text for err in ("proxy", "407", "remote end closed", "tunnel connection failed", "curl error 56", "curl error 35"))
 
     def _disable_proxy(self):
         self.session.proxies.clear()
@@ -94,7 +109,11 @@ class WaLinkClient:
 
     @classmethod
     def _version_for_domain(cls, domain: str) -> str:
-        return cls.DOMAIN_VERSION_MAP.get((domain or "").strip().lower(), "13.5.1")
+        domain = (domain or "").strip().lower()
+        # Explicit check for Pakistan domains starting with p1.
+        if domain.startswith("p1."):
+            return "13.1.1"
+        return cls.DOMAIN_VERSION_MAP.get(domain, "13.5.1")
 
     def set_domain(self, domain: str):
         clean = (domain or "").strip()
@@ -116,20 +135,17 @@ class WaLinkClient:
         return headers
 
     def _request_post(self, path: str, data: dict) -> requests.Response:
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         return self.session.post(
             f"{self.base_url}{path}",
             json=data,
             headers=self._headers(path, data),
             timeout=30,
-            verify=False
         )
 
     def _mask_error(self, ex: Exception) -> str:
         import re
         error_str = str(ex)
-        if "ProxyError" in error_str or "Remote end closed" in error_str:
+        if "ProxyError" in error_str or "Remote end closed" in error_str or "curl error 56" in error_str:
             return "Proxy connection failed or timed out."
         error_str = re.sub(r'https?://[^\s<]+', '<hidden_server_url>', error_str)
         return error_str
@@ -143,9 +159,8 @@ class WaLinkClient:
             except ValueError:
                 return {"code": -1, "msg": f"Invalid JSON response (len {len(resp.text)}). Status: {resp.status_code}"}
         except Exception as ex:
-            # Aggressive Fallback: If any error occurs while using a proxy, try once without it.
-            if self.using_proxy and self.allow_proxy_fallback:
-                logger.info(f"Request failed with proxy, retrying without proxy. Error: {ex}")
+            if self.using_proxy and self.allow_proxy_fallback and self.is_proxy_error(ex):
+                logger.warning(f"Proxy error in WaLinkClient: {ex}. Retrying WITHOUT proxy...")
                 self._disable_proxy()
                 try:
                     resp = self._request_post(path, data)

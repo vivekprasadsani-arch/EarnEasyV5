@@ -3,14 +3,13 @@ import io
 import logging
 import re
 import time
-import random
+import threading
 
 import requests
 from PIL import Image, ImageOps
 
-from bot_requests import DeepEarnClientEmailnator, DeepEarnClientGmail, EmailnatorClient, GmailEmailClient, generate_pwd
+from bot_requests import DeepEarnClient, EmailnatorClient, generate_pwd
 from wa_link_gui import WaLinkClient
-import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ OTP_SUBJECT_HINTS = ("verification", "verify", "code", "registration", "otp", "c
 OTP_POLL_INTERVAL_SECONDS = 3
 OTP_MAX_POLLS = 50
 OTP_RESEND_POLLS = {12, 28}
-MAX_EMAIL_CANDIDATES_PER_ATTEMPT = 5
+MAX_EMAIL_CANDIDATES_PER_ATTEMPT = 10
 
 
 def _close_quietly(client):
@@ -47,6 +46,13 @@ def _extract_otp(*sources):
     for source in sources:
         if not source:
             continue
+        # 1. Try patterns on RAW source (works best for HTML like <b>123456</b>)
+        for pattern in patterns:
+            match = re.search(pattern, str(source), re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1)
+                
+        # 2. Try patterns on normalized source (stripped of tags)
         normalized = re.sub(r"<[^>]+>", " ", str(source))
         normalized = re.sub(r"\s+", " ", normalized)
         for pattern in patterns:
@@ -91,14 +97,27 @@ def generate_qr_image(url: str, client: WaLinkClient = None) -> bytes:
         resp = None
         for attempt in range(10):
             try:
-                if client:
+                # Use the client's session (curl_cffi) if available
+                if client and hasattr(client, 'session'):
                     resp = client.session.get(url, timeout=30)
                 else:
-                    resp = requests.get(url, timeout=30)
+                    # Fallback to direct request if no client
+                    from curl_cffi import requests as curl_req
+                    resp = curl_req.get(url, timeout=30, impersonate="chrome110")
                 resp.raise_for_status()
                 break
-            except requests.exceptions.RequestException as e:
+            except Exception as e:
                 if attempt < 9:
+                    # If proxy fails, try one attempt WITHOUT proxy for image download
+                    if attempt == 4 and client:
+                        logger.warning(f"Proxy failing for QR image download, trying direct: {e}")
+                        try:
+                            from curl_cffi import requests as curl_req
+                            resp = curl_req.get(url, timeout=30, impersonate="chrome110")
+                            resp.raise_for_status()
+                            break
+                        except:
+                            pass
                     time.sleep(2)
                 else:
                     raise e
@@ -132,19 +151,7 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
     if not domain:
         raise ValueError(f"Unknown site: {site_id}")
 
-    # Check Emailnator toggle status
-    emailnator_status = await db.get_bot_setting("emailnator_enabled", "true")
-    use_emailnator = emailnator_status.lower() == "true"
-
-    async def _get_gmail_cred():
-        gmails = await db.get_all_gmails()
-        if not gmails:
-            raise RuntimeError("No Gmail accounts found in database. Emailnator is OFF.")
-        # For simplicity, pick a random one or use a rotation logic if needed.
-        # Here we just pick the first one for the attempt.
-        return random.choice(gmails)
-
-    def _sync_create(gmail_cred=None):
+    def _sync_create():
         last_error = ""
         current_step = "starting"
         for attempt in range(3):
@@ -152,36 +159,20 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
             earn_client = None
             email = ""
             try:
-                if use_emailnator:
-                    earn_client = DeepEarnClientEmailnator(
-                        inviter_code=invite_code,
-                        proxy_url=proxy,
-                        domain=domain,
-                        allow_proxy_fallback=True,
-                    )
-                    email_client = EmailnatorClient(proxy_url=proxy, allow_proxy_fallback=True)
-                else:
-                    if not gmail_cred:
-                        raise RuntimeError("Gmail credentials required but not provided")
-                    earn_client = DeepEarnClientGmail(
-                        inviter_code=invite_code,
-                        proxy_url=proxy,
-                        domain=domain
-                    )
-                    email_client = GmailEmailClient(site_id, gmail_cred)
+                earn_client = DeepEarnClient(
+                    inviter_code=invite_code,
+                    proxy_url=proxy,
+                    domain=domain,
+                    allow_proxy_fallback=True,
+                )
 
                 current_step = "email generation"
                 for email_try in range(MAX_EMAIL_CANDIDATES_PER_ATTEMPT):
-                    if use_emailnator:
-                        # Emailnator generate_email closes old session internally if needed
-                        email = email_client.generate_email()
-                    else:
-                        # Gmail generate_email needs the db check
-                        email = email_client.generate_email(db_check_func=db.is_alias_used)
-                        
+                    _close_quietly(email_client)
+                    email_client = EmailnatorClient(proxy_url=proxy, allow_proxy_fallback=True)
+                    email = email_client.generate_email(site_id=site_id)
                     if not email:
                         raise RuntimeError("Failed to generate email")
-
                     current_step = "otp send"
                     otp_resp = earn_client.send_otp(email)
                     if otp_resp.get("code") == 200:
@@ -209,13 +200,11 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 provider_name = getattr(email_client, "provider_name", "unknown")
                 logger.info("OTP polling started for %s via %s", email, provider_name)
 
-                poll_count = 5
-                for poll_index in range(poll_count):
+                for poll_index in range(OTP_MAX_POLLS):
                     if poll_index:
-                        # Fast polling for Gmail (1s), original 3s for Emailnator
-                        time.sleep(OTP_POLL_INTERVAL_SECONDS if use_emailnator else 1.5)
+                        time.sleep(OTP_POLL_INTERVAL_SECONDS)
 
-                    if use_emailnator and poll_index in OTP_RESEND_POLLS:
+                    if poll_index in OTP_RESEND_POLLS:
                         resend_resp = earn_client.send_otp(email)
                         if resend_resp.get("code") != 200:
                             logger.warning("OTP resend failed for %s via %s: %s", email, provider_name, resend_resp)
@@ -227,15 +216,12 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                         continue
 
                     for message in _message_candidates(msgs):
-                        # Extract from body or subject
-                        text_to_search = [
+                        otp = _extract_otp(
                             message.get("subject"),
-                            message.get("body"), # Gmail has 'body'
-                            message.get("text"), # Emailnator candidates might have 'text'
+                            message.get("text"),
                             message.get("preview"),
                             message.get("snippet"),
-                        ]
-                        otp = _extract_otp(*text_to_search)
+                        )
                         if otp:
                             break
 
@@ -244,10 +230,7 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                             continue
 
                         try:
-                            # For Emailnator, we might need to fetch full content
-                            if use_emailnator:
-                                content = email_client.get_message_content(email, message_id)
-                                otp = _extract_otp(content)
+                            content = email_client.get_message_content(email, message_id)
                         except Exception as content_error:
                             logger.warning(
                                 "OTP content fetch failed for %s via %s: %s",
@@ -257,6 +240,7 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                             )
                             continue
 
+                        otp = _extract_otp(content)
                         if otp:
                             break
 
@@ -266,10 +250,12 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 if not otp:
                     raise RuntimeError(
                         f"Timeout waiting for OTP email via {provider_name} "
-                        f"after {poll_count * (OTP_POLL_INTERVAL_SECONDS if use_emailnator else 3)}s"
+                        f"after {OTP_MAX_POLLS * OTP_POLL_INTERVAL_SECONDS}s"
                     )
 
                 current_step = "registration"
+                # Small sleep to ensure backend is ready for the code
+                time.sleep(2)
                 reg_resp = earn_client.register(email, password, otp)
                 if reg_resp.get("code") != 200:
                     raise RuntimeError(f"Registration failed: {reg_resp.get('msg')}")
@@ -277,27 +263,22 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 return email
             except Exception as e:
                 last_error = str(e)
-                # Ensure we don't leak URLs in logs
                 last_error = re.sub(r"https?://[^\s<]+", "<hidden_url>", last_error)
-                
-                if "very frequent" in last_error.lower():
-                    wait_time = random.uniform(5, 10)
-                    logger.warning(f"Rate limited (very frequent). Sleeping {wait_time:.2f}s before retry.")
-                    time.sleep(wait_time)
-                
+                if "ProxyError" in last_error or "Remote end closed" in last_error:
+                    last_error = f"{current_step}: Proxy connection dropped."
+                elif "proxy" in last_error.lower() and "dropped" in last_error.lower():
+                    last_error = f"{current_step}: Proxy connection dropped."
+                else:
+                    last_error = f"{current_step}: {last_error}"
                 logger.warning("Account creation attempt %s failed: %s", attempt + 1, last_error)
-                time.sleep(2)
+                time.sleep(5) # Delay before retry
             finally:
                 _close_quietly(email_client)
                 _close_quietly(earn_client)
 
         raise RuntimeError(f"Account creation failed after retries: {last_error}")
 
-    gmail_cred = None
-    if not use_emailnator:
-        gmail_cred = await _get_gmail_cred()
-        
-    return await asyncio.to_thread(_sync_create, gmail_cred=gmail_cred)
+    return await asyncio.to_thread(_sync_create)
 
 
 async def generate_wa_qr(site_id: str, email: str, password: str, proxy: str = None):
@@ -353,9 +334,9 @@ async def generate_wa_qr(site_id: str, email: str, password: str, proxy: str = N
                 return client, device_id, invite_code, qr_bytes
             except Exception as e:
                 last_error = str(e)
-                # Ensure we don't leak URLs in logs
                 last_error = re.sub(r"https?://[^\s<]+", "<hidden_url>", last_error)
-                logger.warning(f"QR Generation attempt {attempt + 1} failed: {last_error}")
+                if "ProxyError" in last_error or "Remote end closed" in last_error:
+                    last_error = "Proxy connection dropped."
                 _close_quietly(client)
                 time.sleep(2)
 
