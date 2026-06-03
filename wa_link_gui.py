@@ -4,10 +4,11 @@ import uuid
 import logging
 from urllib.parse import urlparse
 
+import requests as std_requests
 try:
-    from curl_cffi import requests
+    from curl_cffi import requests as curl_requests
 except ImportError:
-    import requests
+    curl_requests = None
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +50,10 @@ class WaLinkClient:
         self.login_email = ""
         self.login_password = ""
         
-        # Use curl_cffi Session for browser fingerprinting and proxy stability
-        if hasattr(requests, "Session") and "impersonate" in str(requests.Session.__init__):
-            self.session = requests.Session(impersonate="chrome110", http_version=1, verify=False)
-        else:
-            self.session = requests.Session()
-            self.session.verify = False
-            self.session.trust_env = False
+        # Use standard requests Session for stability against SSL certificate errors
+        self.session = std_requests.Session()
+        self.session.verify = False
+        self.session.trust_env = False
             
         self.using_proxy = bool(self.proxy_url)
         if self.using_proxy:
@@ -135,12 +133,13 @@ class WaLinkClient:
         headers["X-Sign"] = Signer.sign(path, data, self.anonymous_uid, request_time)
         return headers
 
-    def _request_post(self, path: str, data: dict) -> requests.Response:
+    def _request_post(self, path: str, data: dict) -> std_requests.Response:
         return self.session.post(
             f"{self.base_url}{path}",
             json=data,
             headers=self._headers(path, data),
             timeout=30,
+            verify=False
         )
 
     def _mask_error(self, ex: Exception) -> str:
