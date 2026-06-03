@@ -7,6 +7,7 @@ import string
 import sys
 import time
 import imaplib
+import urllib3
 import email as email_lib
 from html import unescape
 import logging
@@ -625,8 +626,10 @@ class DeepEarnClientEmailnator:
         self.using_proxy = False
 
     def _request_post(self, path, data):
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         return self.session.post(
-            f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25
+            f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25, verify=False
         )
 
     def _post(self, path, data):
@@ -685,3 +688,4 @@ class DeepEarnClientEmailnator:
 
 def generate_pwd(length=8):
     return "".join(random.choices(string.digits, k=length))
+ "".join(random.choices(string.digits, k=length))
