@@ -39,24 +39,35 @@ def _close_quietly(client):
 import email.utils
 from datetime import datetime, timezone
 
-def _extract_otp(msgs_content, start_time_ts=None):
+def _extract_otp(msgs_content, expected_prefix=None):
     patterns = (
         r">\s*(\d{6})\s*<",
         r"\bcode\b[^0-9]{0,20}(\d{6})\b",
         r"\botp\b[^0-9]{0,20}(\d{6})\b",
         r"\b(\d{6})\b",
     )
+    
     for content in msgs_content:
         if not content:
             continue
+            
+        content_str = str(content)
+        
+        # Isolation Check: If we know the prefix, the body MUST contain it.
+        # This prevents picking up another user's OTP in a shared Gmail.
+        if expected_prefix:
+            # Match the prefix as a whole word or with dots
+            if expected_prefix.lower() not in content_str.lower():
+                continue
+
         # 1. Try patterns on RAW source
         for pattern in patterns:
-            match = re.search(pattern, str(content), re.IGNORECASE | re.DOTALL)
+            match = re.search(pattern, content_str, re.IGNORECASE | re.DOTALL)
             if match:
                 return match.group(1)
                 
         # 2. Try patterns on normalized source
-        normalized = re.sub(r"<[^>]+>", " ", str(content))
+        normalized = re.sub(r"<[^>]+>", " ", content_str)
         normalized = re.sub(r"\s+", " ", normalized)
         for pattern in patterns:
             match = re.search(pattern, normalized, re.IGNORECASE | re.DOTALL)
@@ -233,6 +244,9 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                 current_step = "otp inbox polling"
                 provider_name = getattr(email_client, "provider_name", "unknown")
                 logger.info("OTP polling started for %s via %s", email, provider_name)
+                
+                # Determine email prefix for isolation
+                email_prefix = email.split('@')[0]
 
                 for poll_index in range(OTP_MAX_POLLS):
                     if poll_index:
@@ -251,14 +265,15 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
                     if not msgs:
                         continue
 
-                    # We check latest messages for OTP with timestamp filtering
+                    # We check latest messages for OTP with timestamp filtering and prefix matching
                     for message in _message_candidates(msgs, start_time_ts=start_time_ts):
                         otp = _extract_otp([
                             message.get("subject"),
                             message.get("text"),
                             message.get("preview"),
                             message.get("snippet"),
-                        ])
+                        ], expected_prefix=email_prefix)
+                        
                         if otp:
                             break
 
@@ -268,10 +283,10 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
 
                         try:
                             content = email_client.get_message_content(email, message_id)
+                            otp = _extract_otp([content], expected_prefix=email_prefix)
                         except Exception:
                             continue
 
-                        otp = _extract_otp([content])
                         if otp:
                             break
 
