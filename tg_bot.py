@@ -308,11 +308,14 @@ async def test_proxy_connection(cq: CallbackQuery):
     
     def _sync_test():
         import requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
             res = requests.get(
                 "https://httpbin.org/ip",
                 proxies={"http": proxy, "https": proxy},
                 timeout=15,
+                verify=False
             )
             res.raise_for_status()
             origin_ip = (res.json() or {}).get("origin", "unknown")
