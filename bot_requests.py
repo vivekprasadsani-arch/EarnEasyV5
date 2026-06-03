@@ -861,7 +861,11 @@ class DeepEarnClient:
 
     def _request_post(self, path, data):
         return self.session.post(
-            f"{self.base_url}{path}", json=data, headers=self.prepare_headers(path, data), timeout=25
+            f"{self.base_url}{path}", 
+            json=data, 
+            headers=self.prepare_headers(path, data), 
+            timeout=25,
+            verify=False
         )
 
     def _rotate_device_fingerprint(self):
