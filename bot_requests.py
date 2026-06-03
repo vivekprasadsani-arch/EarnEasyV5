@@ -16,6 +16,9 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 try:
     from curl_cffi import requests as curl_requests
 except ImportError:
@@ -96,6 +99,7 @@ def _load_camoufox_bypasser():
         return _CF_BYPASSER_CLASS
 
     # Disable Camoufox update checks BEFORE importing to prevent GitHub API rate limit crashes
+    os.environ["CAMOUFOX_SKIP_UPDATE"] = "1"
     os.environ["CAMOUFOX_ALLOW_UPDATE"] = "0"
 
     repo_dir = Path(__file__).resolve().parent / "CloudflareBypassForScraping-main"
@@ -139,26 +143,30 @@ class LegacyEmailnatorClient:
             except Exception as e:
                 logger.warning(f"curl_cffi session init failed: {e}. Falling back to requests.")
                 self.session = requests.Session()
-                self.session.trust_env = False
                 self.session.verify = False
+                self.session.trust_env = False
         else:
             self.session = requests.Session()
-            self.session.trust_env = False
             self.session.verify = False
+            self.session.trust_env = False
         
         if proxy_url:
             p = normalize_proxy_url(proxy_url)
             self.session.proxies.update({"http": p, "https": p})
             
-        if not hasattr(self.session, "impersonate"):
-            self.session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "X-Requested-With": "XMLHttpRequest",
-            })
-        else:
-            # When using curl_cffi impersonate, we only add minimal required headers
-            self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
+        # Standard headers to match HAR
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "X-Requested-With": "XMLHttpRequest",
+            "sec-ch-ua": '"Microsoft Edge";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+        })
 
     def is_proxy_error(self, ex: Exception) -> bool:
         """Check if the error is related to proxy connectivity."""
@@ -206,7 +214,7 @@ class LegacyEmailnatorClient:
                             p = normalize_proxy_url(self.proxy_url)
                             self.session.proxies.update({"http": p, "https": p})
                         self.session.headers.update({
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
                             "Accept": "application/json, text/plain, */*",
                             "X-Requested-With": "XMLHttpRequest",
                         })
@@ -239,8 +247,9 @@ class LegacyEmailnatorClient:
     def _update_xsrf_token(self):
         xsrf_token = self.session.cookies.get("XSRF-TOKEN")
         if xsrf_token:
-            # Use raw cookie value for X-XSRF-TOKEN header
-            self.session.headers.update({"X-XSRF-TOKEN": requests.utils.unquote(xsrf_token)})
+            # Use raw cookie value for x-xsrf-token header (lowercase as per HAR)
+            token_value = requests.utils.unquote(xsrf_token)
+            self.session.headers.update({"x-xsrf-token": token_value})
 
     def generate_email(self):
         # We'll try dotGmail specifically as it's more stable for DeepEarn
@@ -256,9 +265,16 @@ class LegacyEmailnatorClient:
             raise RuntimeError("Emailnator returned empty email list")
         
         # After generating, we 'visit' the mailbox to activate it
+        # This simulates the "Go" button described by the user
         self.session.headers.update({"Referer": "https://www.emailnator.com/"})
         self._request("GET", "https://www.emailnator.com/mailbox/", timeout=25)
         self._update_xsrf_token()
+        
+        # Trigger an initial message list call to fully associate the email with the session
+        try:
+            self.get_messages(email)
+        except Exception as e:
+            logger.warning(f"Initial message list fetch failed for {email}: {e}")
         
         return email
 
@@ -327,13 +343,21 @@ class ManualEmailnatorClient(LegacyEmailnatorClient):
                 data = json.load(f)
             
             # 1. Handle User-Agent
-            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0"
             if isinstance(data, dict):
                 user_agent = data.get("user_agent", user_agent)
             
             self.session.headers.update({
                 "User-Agent": user_agent,
-                "X-Requested-With": "XMLHttpRequest"
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "X-Requested-With": "XMLHttpRequest",
+                "sec-ch-ua": '"Microsoft Edge";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin",
             })
             
             # 2. Handle Cookies (Dict or List format)
@@ -780,8 +804,8 @@ class DeepEarnClient:
             self.session = curl_requests.Session(impersonate="chrome110", http_version=1, verify=False)
         else:
             self.session = requests.Session()
-            self.session.trust_env = False
             self.session.verify = False
+            self.session.trust_env = False
 
         self.allow_proxy_fallback = allow_proxy_fallback
         if self.using_proxy:
