@@ -370,6 +370,9 @@ async def test_proxy_connection(cq: CallbackQuery):
     
     def _sync_test():
         import requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         # List of endpoints to test proxy against
         endpoints = [
             "https://api.ipify.org?format=json",
@@ -386,6 +389,7 @@ async def test_proxy_connection(cq: CallbackQuery):
                         url,
                         proxies={"http": proxy, "https": proxy},
                         timeout=12,
+                        verify=False # Disable SSL verification for testing
                     )
                     if res.status_code == 200:
                         try:
