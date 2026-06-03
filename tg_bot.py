@@ -29,6 +29,7 @@ class BotStates(StatesGroup):
     waiting_for_invite = State()
     waiting_for_proxy = State()
     waiting_for_password = State()
+    waiting_for_gmail_info = State()
 
 COUNTRIES = {
     "india": "🇮🇳 India",
@@ -292,7 +293,7 @@ async def prompt_add_gmail(cq: CallbackQuery, state: FSMContext):
     if cq.from_user.id != config.ADMIN_USER_ID:
         return
     await cq.message.answer("📧 Send the Gmail address and App Password separated by a comma:\n`email@gmail.com, app_password`", parse_mode="Markdown")
-    await state.set_state("waiting_for_gmail_info")
+    await state.set_state(BotStates.waiting_for_gmail_info)
     await cq.answer()
 
 @router.message(BotStates.waiting_for_gmail_info)
