@@ -135,14 +135,16 @@ class LegacyEmailnatorClient:
         if curl_requests:
             try:
                 # Force http_version=1 (HTTP/1.1) to avoid 'Proxy CONNECT aborted' errors
-                self.session = curl_requests.Session(impersonate=imp, http_version=1)
+                self.session = curl_requests.Session(impersonate=imp, http_version=1, verify=False)
             except Exception as e:
                 logger.warning(f"curl_cffi session init failed: {e}. Falling back to requests.")
                 self.session = requests.Session()
                 self.session.trust_env = False
+                self.session.verify = False
         else:
             self.session = requests.Session()
             self.session.trust_env = False
+            self.session.verify = False
         
         if proxy_url:
             p = normalize_proxy_url(proxy_url)
@@ -198,6 +200,7 @@ class LegacyEmailnatorClient:
                         logger.warning("Switching to standard requests fallback...")
                         old_session = self.session
                         self.session = requests.Session()
+                        self.session.verify = False
                         self.session.trust_env = False
                         if self.using_proxy:
                             p = normalize_proxy_url(self.proxy_url)
@@ -307,6 +310,7 @@ class ManualEmailnatorClient(LegacyEmailnatorClient):
         
         # We manually set up standard requests session for manual cookies
         self.session = requests.Session()
+        self.session.verify = False
         self.session.trust_env = False
         if self.proxy_url:
             p = normalize_proxy_url(self.proxy_url)
@@ -773,10 +777,11 @@ class DeepEarnClient:
         
         if curl_requests:
             # Use http_version=1 to avoid 'Proxy CONNECT aborted' errors
-            self.session = curl_requests.Session(impersonate="chrome110", http_version=1)
+            self.session = curl_requests.Session(impersonate="chrome110", http_version=1, verify=False)
         else:
             self.session = requests.Session()
             self.session.trust_env = False
+            self.session.verify = False
 
         self.allow_proxy_fallback = allow_proxy_fallback
         if self.using_proxy:

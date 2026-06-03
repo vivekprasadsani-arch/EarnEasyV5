@@ -103,7 +103,7 @@ def generate_qr_image(url: str, client: WaLinkClient = None) -> bytes:
                 else:
                     # Fallback to direct request if no client
                     from curl_cffi import requests as curl_req
-                    resp = curl_req.get(url, timeout=30, impersonate="chrome110")
+                    resp = curl_req.get(url, timeout=30, impersonate="chrome110", verify=False)
                 resp.raise_for_status()
                 break
             except Exception as e:
@@ -113,7 +113,7 @@ def generate_qr_image(url: str, client: WaLinkClient = None) -> bytes:
                         logger.warning(f"Proxy failing for QR image download, trying direct: {e}")
                         try:
                             from curl_cffi import requests as curl_req
-                            resp = curl_req.get(url, timeout=30, impersonate="chrome110")
+                            resp = curl_req.get(url, timeout=30, impersonate="chrome110", verify=False)
                             resp.raise_for_status()
                             break
                         except:
