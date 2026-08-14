@@ -26,12 +26,39 @@ COUNTRY_CODES = [
     "973", "974", "975", "976", "977", "992", "993", "994", "995", "996", "998"
 ]
 
-def extract_area_code(phone_number):
-    cleaned = "".join(c for c in phone_number if c.isdigit())
+def clean_and_normalize_phone(wa_phone, default_country_code="92"):
+    """
+    Cleans phone number from formatting and normalizes to full international format:
+    - Strips leading '+'
+    - Resolves local formatting (e.g. leading 0)
+    - Detects country code (resolves Greek '30' collision on Pakistani local format)
+    Returns: (normalized_number, country_code)
+    """
+    cleaned = "".join(c for i, c in enumerate(wa_phone) if c.isdigit() or (c == '+' and i == 0))
+    digits = cleaned.lstrip("+")
+    
+    # Handle domestic formatting with leading 0 (e.g., 0309... -> 92309...)
+    if digits.startswith("0"):
+        digits = digits[1:]
+        return f"{default_country_code}{digits}", default_country_code
+        
+    # Check if starts with a valid country code
+    matched_code = None
     for code in sorted(COUNTRY_CODES, key=len, reverse=True):
-        if cleaned.startswith(code):
-            return code
-    return "92" # Default to Pakistan
+        if digits.startswith(code):
+            # Greece code '30' collision check:
+            # If default is Pakistan '92' and we see a 10-digit number starting with '30...',
+            # it's a domestic Pakistan number without the leading '0' (e.g. 3090352946).
+            if code == "30" and default_country_code == "92" and len(digits) == 10:
+                continue
+            matched_code = code
+            break
+            
+    if matched_code:
+        return digits, matched_code
+    else:
+        # Domestic format without leading 0 (e.g. 309... -> 92309...)
+        return f"{default_country_code}{digits}", default_country_code
 
 async def create_account(site_id: str, invite_code: str, proxy: str = None, password: str = "53561106Tojo"):
     """Creates a new registered account on c88zz.com."""
@@ -65,10 +92,8 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
 
 async def start_whatsapp_link(username: str, password: str, proxy: str = None, wa_phone: str = ""):
     """Logs into the c88zz.com account, requests the WhatsApp link, and fetches the pairing code."""
-    if wa_phone.startswith("+"):
-        wa_phone = wa_phone[1:]
-        
-    area_code = extract_area_code(wa_phone)
+    # Robustly clean and normalize the WhatsApp number
+    normalized_phone, area_code = clean_and_normalize_phone(wa_phone)
     
     def _sync_start():
         client = C88ZZClient(proxy_url=proxy)
@@ -79,7 +104,7 @@ async def start_whatsapp_link(username: str, password: str, proxy: str = None, w
                 raise RuntimeError(f"Login failed: {login_res.get('message')}")
             
             # Start linking
-            start_res = client.whatsapp_start(wa_phone, area_code)
+            start_res = client.whatsapp_start(normalized_phone, area_code)
             if start_res.get("code") != 200:
                 raise RuntimeError(f"WhatsApp start link failed: {start_res.get('message')}")
             
@@ -87,16 +112,20 @@ async def start_whatsapp_link(username: str, password: str, proxy: str = None, w
             if not session_id:
                 raise RuntimeError("No session_id returned from whatsapp_start")
                 
-            time.sleep(2)
-            
-            # Get code
-            code_res = client.whatsapp_code(session_id, wa_phone)
-            if code_res.get("code") != 200:
-                raise RuntimeError(f"Failed to fetch pairing code: {code_res.get('message')}")
+            # Poll for the pairing code up to 5 times (total 10 seconds)
+            # This handles server load where pairing codes take some time to generate
+            pair_code = None
+            for attempt in range(5):
+                time.sleep(2)
+                code_res = client.whatsapp_code(session_id, normalized_phone)
+                if code_res.get("code") == 200:
+                    pair_code = code_res.get("data", {}).get("pair_code") or code_res.get("data", {}).get("code")
+                    if pair_code:
+                        break
+                logger.warning(f"Pairing code not ready on attempt {attempt+1}, retrying...")
                 
-            pair_code = code_res.get("data", {}).get("pair_code") or code_res.get("data", {}).get("code")
             if not pair_code:
-                raise RuntimeError("No pairing code returned from whatsapp_code")
+                raise RuntimeError("No pairing code returned from whatsapp_code after retries")
                 
             return client, session_id, pair_code
         except Exception as e:
