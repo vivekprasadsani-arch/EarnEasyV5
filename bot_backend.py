@@ -111,14 +111,11 @@ async def poll_wa_status(client: C88ZZClient, session_id: str):
         try:
             # Check online status
             check_res = client.whatsapp_check(session_id)
-            status_res = client.whatsapp_status(session_id)
             
-            # Look at both check and status response
             is_online = check_res.get("data", {}).get("is_online", False)
-            status_val = status_res.get("data", {}).get("status", "")
             
             # Return uniform dictionary format for tg_bot to consume
-            if is_online or status_val == "WORKING":
+            if is_online:
                 return {"code": 200, "data": {"login_status": 2, "wid": "Linked"}}
             else:
                 return {"code": 200, "data": {"login_status": 1, "wid": ""}}
