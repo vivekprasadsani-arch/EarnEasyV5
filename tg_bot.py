@@ -40,14 +40,10 @@ class BotStates(StatesGroup):
     waiting_for_invite = State()
     waiting_for_proxy = State()
     waiting_for_password = State()
-    waiting_for_gmail_email = State()
-    waiting_for_gmail_app_pass = State()
+    waiting_for_whatsapp_number = State()
 
 COUNTRIES = {
-    "india": "🇮🇳 India",
-    "pakistan": "🇵🇰 Pakistan",
-    "south_africa": "🇿🇦 South Africa",
-    "nigeria": "🇳🇬 Nigeria"
+    "pakistan": "🇵🇰 Pakistan"
 }
 
 def main_keyboard():
@@ -64,8 +60,8 @@ async def setup_bot_commands():
     await bot.set_my_commands([
         BotCommand(command="start", description="Open the main menu"),
         BotCommand(command="setpassword", description="Set your default account password"),
-        BotCommand(command="addgmail", description="Add new Gmail & App Password (Admin only)"),
     ])
+
 
 async def safe_edit_message(message: Message, text: str, parse_mode: str = None):
     try:
@@ -212,43 +208,7 @@ async def cmd_setpassword(message: Message, state: FSMContext):
     await message.answer("🔑 Enter your new custom default password for accounts:")
     await state.set_state(BotStates.waiting_for_password)
 
-@router.message(Command("addgmail"))
-async def cmd_addgmail(message: Message, state: FSMContext):
-    if message.from_user.id != config.ADMIN_USER_ID:
-        await message.answer("❌ This command is only available for the Admin.")
-        return
-    await message.answer("📧 Enter the **Gmail Address** you want to add:", parse_mode="Markdown", reply_markup=ForceReply())
-    await state.set_state(BotStates.waiting_for_gmail_email)
 
-@router.message(BotStates.waiting_for_gmail_email)
-async def process_new_gmail_email(message: Message, state: FSMContext):
-    if message.from_user.id != config.ADMIN_USER_ID: return
-    email_addr = message.text.strip().lower()
-    if not re.match(r"^[\w\.-]+@gmail\.com$", email_addr):
-        await message.answer("❌ Invalid format. Please send a valid **@gmail.com** address:")
-        return
-    await state.update_data(new_gmail=email_addr)
-    await message.answer(f"🔑 Now enter the **16-digit App Password** for `{email_addr}`:", parse_mode="Markdown", reply_markup=ForceReply())
-    await state.set_state(BotStates.waiting_for_gmail_app_pass)
-
-@router.message(BotStates.waiting_for_gmail_app_pass)
-async def process_new_gmail_app_pass(message: Message, state: FSMContext):
-    if message.from_user.id != config.ADMIN_USER_ID: return
-    app_pass = message.text.strip().replace(" ", "")
-    if len(app_pass) != 16:
-        await message.answer("❌ Invalid App Password. It must be exactly **16 characters** long. Please try again:")
-        return
-    
-    data = await state.get_data()
-    email_addr = data.get("new_gmail")
-    
-    try:
-        await db.add_gmail_credential(email_addr, app_pass)
-        await message.answer(f"✅ Successfully added `{email_addr}` to the rotation list!", parse_mode="Markdown", reply_markup=main_keyboard())
-        await state.clear()
-    except Exception as e:
-        await message.answer(f"❌ Failed to save to database: {str(e)}")
-        await state.clear()
 
 @router.message(BotStates.waiting_for_password)
 async def process_password(message: Message, state: FSMContext):
@@ -449,12 +409,6 @@ async def process_invite(message: Message, state: FSMContext):
     text = message.text.strip()
     data = await state.get_data()
     method = data.get("method")
-    
-    # Existing MAR/SAS logic...
-    invite_codes = re.findall(r'\d{7,12}', text)
-    if not invite_codes:
-        invite_codes = [text]
-
     country_code = data.get("country_code")
     
     if not country_code or not method:
@@ -462,116 +416,132 @@ async def process_invite(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    if invite_codes:
-        await state.update_data(invite_code=invite_codes[-1])
+    invite_codes = re.findall(r'[a-zA-Z0-9]{5,12}', text)
+    if not invite_codes:
+        invite_codes = [text]
+
+    code = invite_codes[-1]
+    await state.update_data(invite_code=code)
     
-    await state.set_state(None) 
+    await message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
+    await state.set_state(BotStates.waiting_for_whatsapp_number)
 
-    if len(invite_codes) > 1:
-        await message.answer(f"⏳ Detected {len(invite_codes)} invite codes. Processing them sequentially to ensure 100% success...")
-
-    for code in invite_codes:
-        asyncio.create_task(
-            generate_and_send_qr(
-                message, 
-                state=state,
-                country_code=country_code, 
-                method=method, 
-                invite_code=code, 
-                user_id=message.from_user.id
-            )
+@router.message(BotStates.waiting_for_whatsapp_number)
+async def process_whatsapp_number(message: Message, state: FSMContext):
+    wa_phone = message.text.strip()
+    cleaned_phone = "".join(c for c in wa_phone if c.isdigit() or c == '+')
+    if not cleaned_phone:
+        await message.answer("❌ Invalid phone number. Please try again:")
+        return
+        
+    data = await state.get_data()
+    country_code = data.get("country_code")
+    method = data.get("method")
+    invite_code = data.get("invite_code")
+    
+    await state.set_state(None) # Clear state to allow other operations
+    
+    asyncio.create_task(
+        start_pairing_flow(
+            message,
+            state=state,
+            country_code=country_code,
+            method=method,
+            invite_code=invite_code,
+            user_id=message.from_user.id,
+            wa_phone=cleaned_phone
         )
+    )
 
-
-async def generate_and_send_qr(message: Message, state: FSMContext, country_code: str, method: str, invite_code: str, user_id: int, message_to_edit: Message = None):
+async def start_pairing_flow(message: Message, state: FSMContext, country_code: str, method: str, invite_code: str, user_id: int, wa_phone: str, message_to_edit: Message = None):
     if message_to_edit:
         try:
             await message_to_edit.delete()
-            status_msg = await message.answer(f"🔄 Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
-            is_photo = False
         except:
-            status_msg = await message.answer(f"🔄 Preparing next account for {COUNTRIES.get(country_code, country_code)}...")
-            is_photo = False
-    else:
-        status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}...")
-        is_photo = False
+            pass
+            
+    status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}... Please wait.")
     
     user_data = await db.get_user(user_id)
     proxy = user_data['proxy']
     password = user_data['custom_password'] or config.DEFAULT_PASSWORD
     
     try:
-        # Create DeepEarn / Emailnator Account - This is internally serialized by REGISTRATION_LOCK
-        email = await backend.create_account(country_code, invite_code, proxy, password)
-        account_id = await db.add_account(user_id, country_code, email, password, invite_code)
+        username = None
+        if method == "sas" and state:
+            data = await state.get_data()
+            username = data.get("current_email")
+            
+        if not username:
+            # Create a new C88ZZ account using generated mobile
+            username = await backend.create_account(country_code, invite_code, proxy, password)
+            await db.add_account(user_id, country_code, username, password, invite_code)
+            if state:
+                await state.update_data(current_email=username)
+                
+        status_msg = await safe_edit_message(
+            status_msg,
+            f"🔄 Account prepared `({username})`. Requesting linking code for `{wa_phone}`...",
+            parse_mode="Markdown"
+        )
         
-        # Save email in state for SAS method reuse
-        if state:
-            await state.update_data(current_email=email)
+        # Start link and get pairing code
+        client, session_id, pair_code = await backend.start_whatsapp_link(username, password, proxy, wa_phone)
         
-        if is_photo:
-            await status_msg.edit_caption(caption=f"🔄 Account created `({email})`! Generating QR...", parse_mode="Markdown")
-        else:
-            status_msg = await safe_edit_message(
-                status_msg,
-                f"🔄 Account created `({email})`! Generating QR...",
-                parse_mode="Markdown",
-            )
-        
-        # Generator QR
-        walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
-        
-        # Send QR code
-        qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
-             InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
-            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{account_id}")]
+            [InlineKeyboardButton(text="📋 Copy Code", switch_inline_query=pair_code)]
         ])
         
-        sent_qr = await message.answer_photo(
-            photo=qr_file,
-            caption=f"📱 **QR Code Ready**\n\n**Email**: `{email}`\n**Invite Code**: `{returned_invite_code}`\n\nScan this QR with WhatsApp natively.",
+        sent_msg = await message.answer(
+            f"📱 **WhatsApp Link Code Ready**\n\n"
+            f"Account: `{username}`\n"
+            f"WhatsApp: `{wa_phone}`\n"
+            f"Code: `{pair_code}`\n\n"
+            f"**How to link:**\n"
+            f"1. Open WhatsApp -> Settings -> Linked Devices\n"
+            f"2. Tap **Link a Device** -> **Link with phone number instead**\n"
+            f"3. Enter the 8-digit code: `{pair_code}`",
             parse_mode="Markdown",
             reply_markup=kb
         )
         await safe_delete_message(status_msg)
         
-        # Start Polling
-        asyncio.create_task(poll_for_success(sent_qr, state, walink_client, device_id, returned_invite_code, email, method, country_code))
+        # Start polling for success
+        asyncio.create_task(
+            poll_for_success(
+                sent_msg,
+                state,
+                client,
+                session_id,
+                invite_code,
+                username,
+                method,
+                country_code
+            )
+        )
         
     except Exception as e:
-        logger.error(f"Error generating QR: {e}")
-        error_text = f"❌ Error during account creation.\n\n`{str(e)}`"
-        if is_photo:
-            await status_msg.edit_caption(caption=error_text, parse_mode="Markdown")
-        else:
-            await safe_edit_message(status_msg, error_text, parse_mode="Markdown")
+        logger.error(f"Error starting pairing: {e}")
+        await safe_edit_message(status_msg, f"❌ Error during account linking.\n\n`{str(e)}`", parse_mode="Markdown")
 
-
-async def poll_for_success(message: Message, state: FSMContext, walink_client, device_id, invite_code, email, method, country_code):
+async def poll_for_success(message: Message, state: FSMContext, client, session_id, invite_code, email, method, country_code):
     user_id = message.chat.id
     try:
         for _ in range(60): # Poll for max length (roughly 2 minutes)
             await asyncio.sleep(2)
-            res = await backend.poll_wa_status(walink_client, device_id, invite_code)
+            res = await backend.poll_wa_status(client, session_id)
             
             if res.get("code") == 200:
                 res_data = res.get("data", {})
                 status = int(res_data.get("login_status", 0))
-                wid = str(res_data.get("wid", "")).strip()
                 
-                if status == 2 and wid:
+                if status == 2:
                     await db.mark_account_linked(user_id, country_code, email)
                     
-                    buttons = [
-                        [InlineKeyboardButton(text="📋 Copy Number", switch_inline_query=wid),
-                         InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email)]
-                    ]
-                    
+                    buttons = []
                     if method == "sas":
                         buttons.append([
-                            InlineKeyboardButton(text="Next ➡️ (Same Invite)", callback_data=f"next_sas_{country_code}")
+                            InlineKeyboardButton(text="Next ➡️ (Same Account)", callback_data=f"next_sas_{country_code}")
                         ])
                     elif method == "mar":
                         buttons.append([
@@ -580,181 +550,66 @@ async def poll_for_success(message: Message, state: FSMContext, walink_client, d
                     
                     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
                     
-                    await message.edit_caption(
-                        caption=f"✅ **Success!**\n\nWhatsApp Number: `{wid}`\nEmail used: `{email}`\n\nUse the Next button to continue.", 
+                    await message.edit_text(
+                        f"✅ **Success!**\n\nWhatsApp has been successfully linked!\nAccount used: `{email}`\n\nUse the Next button to continue.", 
                         parse_mode="Markdown",
                         reply_markup=kb
                     )
                     return
     finally:
         try:
-            walink_client.close()
+            client.close()
         except Exception:
             pass
-
-@router.callback_query(F.data.startswith("regen_"))
-async def handle_regenerate_qr(cq: CallbackQuery, state: FSMContext):
-    # format: regen_accountid
-    account_id = int(cq.data.split("_")[1])
-    
-    account = await db.get_account_by_id(account_id)
-    if not account:
-        await safe_answer_callback(cq, "❌ Error: Account not found in database.", show_alert=True)
-        return
-        
-    email = account['email']
-    invite_code = account['invite_code']
-    country_code = account['site_id']
-    
-    user_id = cq.from_user.id
-    user_data = await db.get_user(user_id)
-    proxy = user_data['proxy']
-    password = user_data['custom_password'] or config.DEFAULT_PASSWORD
-    
-    # Blur/Deleting effect for Regenerate QR
-    await safe_answer_callback(cq, "🔄 Re-generating QR...", show_alert=False)
-    try:
-        # Delete old message to create the clearing effect
-        await cq.message.delete()
-    except:
-        pass
-        
-    status_msg = await cq.message.answer(f"🔄 Re-generating QR Code for {COUNTRIES.get(country_code, country_code)}... Please wait.")
-        
-    try:
-        # We don't need to recreate the deep earn account, just re-login to WaLink
-        walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
-        
-        qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
-             InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
-            [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{account_id}")]
-        ])
-        
-        new_msg = await cq.message.answer_photo(
-            photo=qr_file,
-            caption=f"📱 **QR Code Re-generated**\n\n**Email**: `{email}`\n**Invite Code**: `{invite_code}`\n\nScan this QR with WhatsApp natively.",
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-        await safe_delete_message(status_msg)
-        
-        # Start Polling again on the new message
-        data = await state.get_data()
-        method = data.get("method")
-        asyncio.create_task(poll_for_success(new_msg, state, walink_client, device_id, invite_code, email, method, country_code))
-        
-    except Exception as e:
-        logger.error(f"Error regenerating QR: {e}")
-        await cq.message.answer(f"❌ Error regenerating QR.\n\n`{str(e)}`", parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("next_"))
 async def handle_next_action(cq: CallbackQuery, state: FSMContext):
     parts = cq.data.split("_")
     method = parts[1]
-    country_code = "_".join(parts[2:])
-    
+    country_code = "_join" if parts[2] == "join" else "_".join(parts[2:]) # handle next_sas_pakistan correctly
+    if country_code == "_join":
+        country_code = "_".join(parts[2:])
+        
     await state.update_data(method=method, country_code=country_code)
     await safe_answer_callback(cq)
     
-    if method == "mar":
-        # MAR: Same Invite, New Account (creates new email)
-        data = await state.get_data()
-        invite_code = data.get("invite_code")
-        if not invite_code:
-            msg = await cq.message.answer("📝 We lost the session invite code. Enter Invite Code:", reply_markup=ForceReply())
-            await state.update_data(prompt_msg_id=msg.message_id) 
-            await state.set_state(BotStates.waiting_for_invite)
-            return
-            
-        await generate_and_send_qr(
-            cq.message, 
-            state=state, 
-            country_code=country_code, 
-            method=method, 
-            invite_code=invite_code, 
-            user_id=cq.from_user.id, 
-            message_to_edit=cq.message
-        ) 
+    data = await state.get_data()
+    invite_code = data.get("invite_code")
+    email = data.get("current_email")
+    
+    if method == "mar" and not invite_code:
+        msg = await cq.message.answer("📝 We lost the session invite code. Enter Invite Code:", reply_markup=ForceReply())
+        await state.update_data(prompt_msg_id=msg.message_id) 
+        await state.set_state(BotStates.waiting_for_invite)
+        return
         
-    elif method == "sas":
-        # SAS: Same Account, New WhatsApp Link (re-uses existing email)
-        data = await state.get_data()
-        invite_code = data.get("invite_code")
-        email = data.get("current_email")
+    if method == "sas" and (not invite_code or not email):
+        msg = await cq.message.answer("📝 Session lost. Starting over. Enter NEW Invite Code:", reply_markup=ForceReply())
+        await state.update_data(prompt_msg_id=msg.message_id) 
+        await state.set_state(BotStates.waiting_for_invite)
+        return
         
-        if not invite_code or not email:
-            msg = await cq.message.answer("📝 Session lost. Starting over. Enter NEW Invite Code:", reply_markup=ForceReply())
-            await state.update_data(prompt_msg_id=msg.message_id) 
-            await state.set_state(BotStates.waiting_for_invite)
-            return
-            
-        user_id = cq.from_user.id
-        user_data = await db.get_user(user_id)
-        proxy = user_data['proxy']
-        password = user_data['custom_password'] or config.DEFAULT_PASSWORD
-        
-        await safe_answer_callback(cq, "🔄 Re-linking same account...", show_alert=False)
-        try:
-            await cq.message.delete()
-        except:
-            pass
-            
-        status_msg = await cq.message.answer(
-            f"🔄 Preparing next link for `{email}`...",
-            parse_mode="Markdown",
-        )
-        
-        try:
-            account_id = await db.add_account(user_id, country_code, email, password, invite_code)
-            walink_client, device_id, returned_invite_code, qr_bytes = await backend.generate_wa_qr(country_code, email, password, proxy)
-            
-            qr_file = BufferedInputFile(qr_bytes, filename="qr.png")
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Copy Email", switch_inline_query=email),
-                 InlineKeyboardButton(text="📋 Copy Invite", switch_inline_query=returned_invite_code)],
-                [InlineKeyboardButton(text="🔄 Regenerate QR", callback_data=f"regen_{account_id}")]
-            ])
-            
-            sent_qr = await cq.message.answer_photo(
-                photo=qr_file,
-                caption=f"📱 **QR Code Ready (Account Re-used)**\n\n**Email**: `{email}`\n**Invite Code**: `{returned_invite_code}`\n\nScan this QR with WhatsApp natively.",
-                parse_mode="Markdown",
-                reply_markup=kb
-            )
-            await safe_delete_message(status_msg)
-            
-            asyncio.create_task(
-                poll_for_success(
-                    sent_qr,
-                    state,
-                    walink_client,
-                    device_id,
-                    returned_invite_code,
-                    email,
-                    "sas",
-                    country_code,
-                )
-            )
-            
-        except Exception as e:
-            logger.error(f"Error re-using account QR: {e}")
-            error_text = f"❌ Error during account reuse.\n\n`{str(e)}`"
-            await safe_edit_message(status_msg, error_text, parse_mode="Markdown")
+    await cq.message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
+    await state.set_state(BotStates.waiting_for_whatsapp_number)
+    try:
+        await cq.message.delete()
+    except:
+        pass
 
-@router.message(F.text.regexp(r"^[\w\.-]+@[\w\.-]+\.\w+$"))
+@router.message(F.text.regexp(r"^\+?[0-9]{10,13}$"))
 async def handle_pasted_email(message: Message, state: FSMContext):
     if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
         return
         
     email = message.text.strip()
-    
-    # Check if this email exists in the user's accounts
+    if email.startswith("+"):
+        email = email[1:]
+        
+    # Check if this mobile exists in the user's accounts
     account = await db.get_latest_account_by_email(message.from_user.id, email)
 
     if not account:
-        return # Not a known email for this user
+        return # Not a known account for this user
         
     country_code = account['site_id']
     invite_code = account['invite_code']
@@ -767,15 +622,8 @@ async def handle_pasted_email(message: Message, state: FSMContext):
         current_email=email
     )
     
-    # Resume SAS flow using common function
-    await generate_and_send_qr(
-        message, 
-        state=state, 
-        country_code=country_code, 
-        method="sas", 
-        invite_code=invite_code, 
-        user_id=message.from_user.id
-    )
+    await message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
+    await state.set_state(BotStates.waiting_for_whatsapp_number)
 
 async def main():
     await db.init_db()
