@@ -277,3 +277,18 @@ async def is_email_used_on_site(site_id: str, email: str):
         )
         return target is not None
     return await asyncio.to_thread(_sync_check)
+
+
+async def update_user_last_request(user_id: int):
+    """Updates the last_request_at timestamp for the user."""
+    import datetime
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "users",
+        params={"user_id": f"eq.{int(user_id)}"},
+        json={"last_request_at": now_iso},
+        prefer="return=minimal",
+    )
+
