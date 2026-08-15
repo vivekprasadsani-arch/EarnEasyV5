@@ -574,6 +574,14 @@ async def post_user_action(request):
 async def handle_ping(request):
     return web.Response(text="pong")
 
+async def handle_healthz(request):
+    try:
+        await db.ping()
+        return web.Response(text="ok")
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return web.Response(text="db unavailable", status=503)
+
 async def start_server():
     """Initializes and runs the web app server concurrently on Render PORT."""
     app = web.Application()
@@ -581,6 +589,8 @@ async def start_server():
     app.router.add_get('/api/users', get_users_api)
     app.router.add_post('/api/users/{user_id}/{action}', post_user_action)
     app.router.add_get('/api/ping', handle_ping)
+    app.router.add_get('/health', handle_healthz)
+    app.router.add_get('/healthz', handle_healthz)
     
     port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
