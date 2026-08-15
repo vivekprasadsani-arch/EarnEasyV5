@@ -310,7 +310,7 @@ async def get_all_users_admin():
     return await asyncio.to_thread(
         _select,
         "users",
-        order="created_at.desc",
+        order="user_id.desc",
     )
 
 
@@ -319,7 +319,7 @@ async def get_all_accounts_admin():
     return await asyncio.to_thread(
         _select,
         "accounts",
-        order="created_at.desc",
+        order="id.desc",
     )
 
 
