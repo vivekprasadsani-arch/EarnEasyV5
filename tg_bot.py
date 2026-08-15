@@ -37,6 +37,7 @@ router = Router()
 class BotStates(StatesGroup):
     waiting_for_proxy = State()
     waiting_for_whatsapp_number = State()
+    waiting_for_payment_details = State()
 
 COUNTRIES = {
     "pakistan": "🇵🇰 Pakistan"
@@ -46,7 +47,8 @@ def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📱 Add WhatsApp")],
-            [KeyboardButton(text="💵 Check Balance"), KeyboardButton(text="⚙️ Settings")]
+            [KeyboardButton(text="💵 Check Balance"), KeyboardButton(text="📤 Withdraw")],
+            [KeyboardButton(text="⚙️ Settings")]
         ],
         resize_keyboard=True,
         is_persistent=True
@@ -54,7 +56,7 @@ def main_keyboard():
 
 async def setup_bot_commands():
     await bot.set_my_commands([
-        BotCommand(command="start", description="Start/Register main account"),
+        BotCommand(command="start", description="Start the bot"),
     ])
 
 async def safe_edit_message(message: Message, text: str, parse_mode: str = None):
@@ -207,8 +209,7 @@ async def cmd_start(message: Message):
             
             await safe_edit_message(
                 status_msg,
-                f"✅ **Main Account Created!**\n\n"
-                f"Your C88ZZ Refer Code is: `{main_invite_code}`\n\n"
+                f"✅ **Welcome!** Your registration request has been submitted.\n\n"
                 f"⏳ Your account is currently pending admin approval. You will be notified once approved."
             )
         except Exception as e:
@@ -268,15 +269,25 @@ async def show_settings(message: Message):
         return
     user = await db.get_user(message.from_user.id)
     proxy = user['proxy'] if user['proxy'] else "Not set"
+    pay_method = user.get("payment_method") or "Not set"
+    pay_details = user.get("payment_details") or "Not set"
     
     kb_buttons = [
-        [InlineKeyboardButton(text="Set Proxy", callback_data="set_proxy")]
+        [InlineKeyboardButton(text="🌐 Set Proxy", callback_data="set_proxy"),
+         InlineKeyboardButton(text="💳 Payment Method", callback_data="set_payment_method")]
     ]
     if user['proxy']:
-        kb_buttons.append([InlineKeyboardButton(text="Test Proxy", callback_data="test_proxy")])
+        kb_buttons.append([InlineKeyboardButton(text="Test Proxy Connection", callback_data="test_proxy")])
         
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-    await message.answer(f"⚙️ **Settings**\n\nCurrent Proxy: `{proxy}`", reply_markup=kb, parse_mode="Markdown")
+    await message.answer(
+        f"⚙️ **Settings**\n\n"
+        f"🌐 **Current Proxy:** `{proxy}`\n"
+        f"💳 **Payment Method:** `{pay_method}`\n"
+        f"📱 **Payment Details:** `{pay_details}`",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
 
 @router.callback_query(F.data == "set_proxy")
 async def prompt_proxy(cq: CallbackQuery, state: FSMContext):
@@ -330,6 +341,48 @@ async def test_proxy_connection(cq: CallbackQuery):
     success, msg = await asyncio.to_thread(_sync_test)
     await cq.message.answer(msg, parse_mode="Markdown")
 
+@router.callback_query(F.data == "set_payment_method")
+async def prompt_payment_method(cq: CallbackQuery):
+    if not await check_user_access(cq.from_user.id, cq.from_user.username or "", cq.from_user.first_name, cq):
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="bKash", callback_data="pay_bKash"),
+         InlineKeyboardButton(text="Nagad", callback_data="pay_nagad")],
+        [InlineKeyboardButton(text="Binance Pay", callback_data="pay_binance"),
+         InlineKeyboardButton(text="UPI", callback_data="pay_upi")]
+    ])
+    await cq.message.answer("💳 **Select your Payment Method:**", reply_markup=kb, parse_mode="Markdown")
+    await safe_answer_callback(cq)
+
+@router.callback_query(F.data.startswith("pay_"))
+async def select_pay_method(cq: CallbackQuery, state: FSMContext):
+    method = cq.data.split("_")[1] # bKash, nagad, binance, upi
+    method_name = {
+        "bKash": "bKash",
+        "nagad": "Nagad",
+        "binance": "Binance Pay",
+        "upi": "UPI"
+    }.get(method, method)
+    
+    await state.update_data(temp_pay_method=method_name)
+    await cq.message.answer(f"📱 Please enter your **{method_name}** number/address details:", reply_markup=ForceReply(), parse_mode="Markdown")
+    await state.set_state(BotStates.waiting_for_payment_details)
+    await safe_answer_callback(cq)
+
+@router.message(BotStates.waiting_for_payment_details)
+async def process_payment_details(message: Message, state: FSMContext):
+    details = message.text.strip()
+    if not details:
+        await message.answer("❌ Details cannot be empty. Please try again:")
+        return
+        
+    data = await state.get_data()
+    method = data.get("temp_pay_method", "bKash")
+    
+    await db.set_user_payment_details(message.from_user.id, method, details)
+    await message.answer(f"✅ Payment method saved successfully!\n\n**Method:** {method}\n**Details:** `{details}`", reply_markup=main_keyboard())
+    await state.clear()
+
 @router.message(F.text == "💵 Check Balance")
 async def cmd_check_balance(message: Message):
     user_id = message.from_user.id
@@ -370,12 +423,14 @@ async def cmd_check_balance(message: Message):
             
     try:
         balance = await backend.get_main_account_balance(main_mobile, password, proxy)
+        try:
+            points = float(balance)
+            usd_val = (points * 0.05) / 278.0
+        except Exception:
+            usd_val = 0.0
         await safe_edit_message(
             status_msg,
-            f"👤 **Main Account details**\n\n"
-            f"Mobile: `{main_mobile}`\n"
-            f"Refer Code: `{main_invite_code}`\n"
-            f"Balance: `{balance}` PKR",
+            f"💵 **Your Balance:** `${usd_val:.2f} USD` ({balance} Points)",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -541,6 +596,147 @@ async def handle_next_action(cq: CallbackQuery):
         await cq.message.delete()
     except:
         pass
+
+@router.message(F.text == "📤 Withdraw")
+async def cmd_withdraw(message: Message):
+    user_id = message.from_user.id
+    if not await check_user_access(user_id, message.from_user.username or "", message.from_user.first_name, message):
+        return
+        
+    user = await db.get_user(user_id)
+    main_mobile = user.get("main_mobile")
+    proxy = user.get("proxy")
+    password = user.get("custom_password") or "53561106@Roni"
+    pay_method = user.get("payment_method")
+    pay_details = user.get("payment_details")
+    
+    if not pay_method or not pay_details:
+        await message.answer("❌ Please set your **Payment Method** first in **⚙️ Settings** before requesting a withdrawal.")
+        return
+        
+    if not main_mobile:
+        await message.answer("❌ Main account not registered. Please check your balance first to register.")
+        return
+        
+    status_msg = await message.answer("🔄 Checking C88ZZ account balance...")
+    try:
+        balance_points_str = await backend.get_main_account_balance(main_mobile, password, proxy)
+        try:
+            balance_points = int(balance_points_str)
+        except Exception:
+            balance_points = 0
+            
+        if balance_points < 4000:
+            usd_needed = (4000 * 0.05) / 278.0
+            usd_current = (balance_points * 0.05) / 278.0
+            await safe_edit_message(
+                status_msg, 
+                f"❌ **Withdrawal Failed**\n\n"
+                f"Minimum withdrawal threshold is **4000 Points** (${usd_needed:.2f} USD).\n"
+                f"Your current balance: **{balance_points} Points** (${usd_current:.2f} USD)."
+            )
+            return
+            
+        # Calculate USD
+        usd_val = (float(balance_points) * 0.05) / 278.0
+        
+        # Insert withdrawal request in DB
+        inserted = await db.add_withdrawal_request(user_id, balance_points, usd_val, pay_method, pay_details)
+        
+        # Get inserted request ID
+        wd_id = 0
+        if inserted and isinstance(inserted, list) and len(inserted) > 0:
+            wd_id = inserted[0].get("id", 0)
+            
+        # Notify admin bot
+        if config.ADMIN_USER_ID != 0:
+            try:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Approve Withdrawal ✅", callback_data=f"wd_approve_{wd_id}"),
+                     InlineKeyboardButton(text="Reject Withdrawal ❌", callback_data=f"wd_reject_{wd_id}")]
+                ])
+                await bot.send_message(
+                    config.ADMIN_USER_ID,
+                    f"📤 **New Withdrawal Request!**\n\n"
+                    f"User ID: `{user_id}`\n"
+                    f"Name: {message.from_user.first_name}\n"
+                    f"Username: @{message.from_user.username or 'None'}\n"
+                    f"Amount: `{balance_points} Points` (${usd_val:.2f} USD)\n"
+                    f"Payment Method: **{pay_method}**\n"
+                    f"Payment Details: `{pay_details}`",
+                    reply_markup=kb
+                )
+            except Exception as admin_err:
+                logger.error(f"Failed to notify admin on withdrawal: {admin_err}")
+                
+        await safe_edit_message(
+            status_msg,
+            f"✅ **Withdrawal Request Submitted!**\n\n"
+            f"Requested: `{balance_points} Points` (${usd_val:.2f} USD)\n"
+            f"Method: **{pay_method}**\n"
+            f"Details: `{pay_details}`\n\n"
+            f"⏳ Your request is currently pending admin approval and processing."
+        )
+        
+    except Exception as e:
+        logger.error(f"Withdrawal request failed: {e}")
+        await safe_edit_message(status_msg, f"❌ Failed to request withdrawal: {str(e)}")
+
+@router.callback_query(F.data.startswith("wd_approve_"))
+async def approve_withdrawal_cb(cq: CallbackQuery):
+    if cq.from_user.id != config.ADMIN_USER_ID:
+        return
+    wd_id = int(cq.data.split("_")[2])
+    
+    wd = await db.get_withdrawal_by_id(wd_id)
+    if not wd:
+        await safe_answer_callback(cq, "❌ Request not found.", show_alert=True)
+        return
+        
+    if wd.get('status') != 'pending':
+        await safe_answer_callback(cq, f"❌ Request already {wd.get('status')}.", show_alert=True)
+        return
+        
+    await db.update_withdrawal_status(wd_id, "approved")
+    await cq.message.edit_text(cq.message.text + "\n\n✅ Withdrawal Approved.")
+    
+    try:
+        await bot.send_message(
+            wd.get('user_id'), 
+            f"🎉 **Withdrawal Approved!**\n\n"
+            f"Your request for `{wd.get('amount_points')} Points` (${wd.get('amount_usd')} USD) via **{wd.get('payment_method')}** has been approved and paid by the Admin!"
+        )
+    except Exception as notify_err:
+        logger.error(f"Failed to notify user on withdrawal approval: {notify_err}")
+    await safe_answer_callback(cq, "Withdrawal approved.")
+
+@router.callback_query(F.data.startswith("wd_reject_"))
+async def reject_withdrawal_cb(cq: CallbackQuery):
+    if cq.from_user.id != config.ADMIN_USER_ID:
+        return
+    wd_id = int(cq.data.split("_")[2])
+    
+    wd = await db.get_withdrawal_by_id(wd_id)
+    if not wd:
+        await safe_answer_callback(cq, "❌ Request not found.", show_alert=True)
+        return
+        
+    if wd.get('status') != 'pending':
+        await safe_answer_callback(cq, f"❌ Request already {wd.get('status')}.", show_alert=True)
+        return
+        
+    await db.update_withdrawal_status(wd_id, "rejected")
+    await cq.message.edit_text(cq.message.text + "\n\n❌ Withdrawal Rejected.")
+    
+    try:
+        await bot.send_message(
+            wd.get('user_id'), 
+            f"❌ **Withdrawal Rejected**\n\n"
+            f"Your request for `{wd.get('amount_points')} Points` (${wd.get('amount_usd')} USD) via **{wd.get('payment_method')}** was rejected by the Admin."
+        )
+    except Exception as notify_err:
+        logger.error(f"Failed to notify user on withdrawal rejection: {notify_err}")
+    await safe_answer_callback(cq, "Withdrawal rejected.")
 
 async def start_background_monitoring():
     """Background task to periodically log into all registered C88ZZ accounts to keep sessions active."""

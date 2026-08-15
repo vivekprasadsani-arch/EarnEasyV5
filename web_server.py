@@ -78,7 +78,7 @@ INDEX_HTML = """<!DOCTYPE html>
         /* Stats Cards */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 1.5rem;
             margin-bottom: 2rem;
         }
@@ -108,6 +108,10 @@ INDEX_HTML = """<!DOCTYPE html>
         
         .stat-card.warning::before {
             background-color: var(--accent-yellow);
+        }
+
+        .stat-card.danger::before {
+            background-color: var(--accent-red);
         }
         
         .stat-title {
@@ -357,6 +361,10 @@ INDEX_HTML = """<!DOCTYPE html>
                 <div class="stat-title">Pending Users</div>
                 <div class="stat-value" id="stat-pending">-</div>
             </div>
+            <div class="stat-card danger">
+                <div class="stat-title">Pending Withdrawals</div>
+                <div class="stat-value" id="stat-withdrawals">-</div>
+            </div>
         </div>
         
         <div class="panel">
@@ -387,6 +395,33 @@ INDEX_HTML = """<!DOCTYPE html>
                 </table>
             </div>
         </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">Withdrawal Requests</div>
+            </div>
+            <div class="table-responsive">
+                <table id="withdrawals-table">
+                    <thead>
+                        <tr>
+                            <th>User ID</th>
+                            <th>Payment Method</th>
+                            <th>Payment Details</th>
+                            <th>Points</th>
+                            <th>USD Value</th>
+                            <th>Status</th>
+                            <th>Requested On</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="withdrawals-tbody">
+                        <tr>
+                            <td colspan="8" class="loading">Loading withdrawal requests...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -399,103 +434,140 @@ INDEX_HTML = """<!DOCTYPE html>
                 document.getElementById('stat-users').innerText = data.stats.total_users;
                 document.getElementById('stat-links').innerText = data.stats.total_linked_accounts;
                 document.getElementById('stat-pending').innerText = data.stats.pending_users;
+                document.getElementById('stat-withdrawals').innerText = data.stats.pending_withdrawals;
                 
+                // 1. Populate Users Table
                 const tbody = document.getElementById('users-tbody');
                 tbody.innerHTML = '';
                 
                 if (data.users.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="9" class="loading">No users found in database.</td></tr>';
-                    return;
-                }
-                
-                data.users.forEach(user => {
-                    // Filter accounts belonging to this user
-                    const userAccounts = data.accounts.filter(acc => acc.user_id === user.user_id);
-                    
-                    const tr = document.createElement('tr');
-                    tr.className = 'expandable-row';
-                    tr.onclick = (e) => {
-                        // Prevent expansion if clicking inputs/buttons inside columns
-                        if (e.target.closest('button') || e.target.closest('input')) return;
-                        toggleRow(user.user_id);
-                    };
-                    
-                    let actionButtons = '';
-                    if (user.status === 'pending') {
-                        actionButtons = `
-                            <div class="actions-cell">
-                                <button class="btn btn-approve" onclick="actionUser(${user.user_id}, 'approve')">Approve ✅</button>
-                                <button class="btn btn-reject" onclick="actionUser(${user.user_id}, 'reject')">Reject ❌</button>
-                            </div>
-                        `;
-                    } else if (user.status === 'approved') {
-                        actionButtons = `<button class="btn btn-reject" onclick="actionUser(${user.user_id}, 'reject')">Revoke ❌</button>`;
-                    } else {
-                        actionButtons = `<button class="btn btn-approve" onclick="actionUser(${user.user_id}, 'approve')">Approve ✅</button>`;
-                    }
-                    
-                    const customPwd = user.custom_password || '53561106@Roni';
-                    const pwdInputHTML = `
-                        <div style="display: flex; align-items: center; gap: 4px;" onclick="event.stopPropagation()">
-                            <input type="text" id="pwd-${user.user_id}" value="${customPwd}" style="background: #222636; border: 1px solid var(--border-color); color: white; padding: 0.25rem 0.5rem; border-radius: 6px; width: 140px; font-size: 0.8rem; outline: none;" onclick="event.stopPropagation()">
-                            <button class="btn" onclick="saveUserPassword(event, ${user.user_id})" style="padding: 0.25rem 0.5rem; font-size: 0.85rem;">💾</button>
-                        </div>
-                    `;
-                    
-                    tr.innerHTML = `
-                        <td><code>${user.user_id}</code></td>
-                        <td>${user.username ? '@' + user.username : '<span style="color: var(--text-secondary)">None</span>'}</td>
-                        <td>${user.first_name || ''}</td>
-                        <td><span class="status-badge status-${user.status}">${user.status.toUpperCase()}</span></td>
-                        <td><code>${user.main_mobile || 'Not Registered'}</code></td>
-                        <td><code>${user.main_invite_code || 'None'}</code></td>
-                        <td>${pwdInputHTML}</td>
-                        <td><span style="font-weight: 600;">${userAccounts.length} accounts</span></td>
-                        <td>${actionButtons}</td>
-                    `;
-                    tbody.appendChild(tr);
-                    
-                    // Create details row
-                    const detailsTr = document.createElement('tr');
-                    detailsTr.id = `details-${user.user_id}`;
-                    detailsTr.className = 'details-row';
-                    
-                    let refCardsHTML = '';
-                    if (userAccounts.length === 0) {
-                        refCardsHTML = '<div style="color: var(--text-secondary); font-size: 0.85rem;">No WhatsApp accounts linked yet under this user.</div>';
-                    } else {
-                        refCardsHTML = '<div class="ref-grid">';
-                        userAccounts.forEach(acc => {
-                            const isOnline = acc.is_linked; // Currently online if is_linked true
-                            refCardsHTML += `
-                                <div class="ref-card">
-                                    <div class="ref-number">📱 ${acc.email}</div>
-                                    <div class="ref-meta">
-                                        <span>Invite: <code>${acc.invite_code}</code></span>
-                                        <span>
-                                            <span class="online-dot ${isOnline ? 'active' : ''}"></span>
-                                            ${isOnline ? 'ONLINE' : 'OFFLINE'}
-                                        </span>
-                                    </div>
+                } else {
+                    data.users.forEach(user => {
+                        const userAccounts = data.accounts.filter(acc => acc.user_id === user.user_id);
+                        
+                        const tr = document.createElement('tr');
+                        tr.className = 'expandable-row';
+                        tr.onclick = (e) => {
+                            if (e.target.closest('button') || e.target.closest('input')) return;
+                            toggleRow(user.user_id);
+                        };
+                        
+                        let actionButtons = '';
+                        if (user.status === 'pending') {
+                            actionButtons = `
+                                <div class="actions-cell">
+                                    <button class="btn btn-approve" onclick="actionUser(${user.user_id}, 'approve')">Approve ✅</button>
+                                    <button class="btn btn-reject" onclick="actionUser(${user.user_id}, 'reject')">Reject ❌</button>
                                 </div>
                             `;
-                        });
-                        refCardsHTML += '</div>';
-                    }
-                    
-                    detailsTr.innerHTML = `
-                        <td colspan="9">
-                            <div class="details-container">
-                                <div class="ref-title">
-                                    <span>Detailed WhatsApp Links</span>
-                                    <span>Invite Code used: <code>${user.main_invite_code || 'ZF5998'}</code></span>
-                                </div>
-                                ${refCardsHTML}
+                        } else if (user.status === 'approved') {
+                            actionButtons = `<button class="btn btn-reject" onclick="actionUser(${user.user_id}, 'reject')">Revoke ❌</button>`;
+                        } else {
+                            actionButtons = `<button class="btn btn-approve" onclick="actionUser(${user.user_id}, 'approve')">Approve ✅</button>`;
+                        }
+                        
+                        const customPwd = user.custom_password || '53561106@Roni';
+                        const pwdInputHTML = `
+                            <div style="display: flex; align-items: center; gap: 4px;" onclick="event.stopPropagation()">
+                                <input type="text" id="pwd-${user.user_id}" value="${customPwd}" style="background: #222636; border: 1px solid var(--border-color); color: white; padding: 0.25rem 0.5rem; border-radius: 6px; width: 140px; font-size: 0.8rem; outline: none;" onclick="event.stopPropagation()">
+                                <button class="btn" onclick="saveUserPassword(event, ${user.user_id})" style="padding: 0.25rem 0.5rem; font-size: 0.85rem;">💾</button>
                             </div>
-                        </td>
-                    `;
-                    tbody.appendChild(detailsTr);
-                });
+                        `;
+                        
+                        tr.innerHTML = `
+                            <td><code>${user.user_id}</code></td>
+                            <td>${user.username ? '@' + user.username : '<span style="color: var(--text-secondary)">None</span>'}</td>
+                            <td>${user.first_name || ''}</td>
+                            <td><span class="status-badge status-${user.status}">${user.status.toUpperCase()}</span></td>
+                            <td><code>${user.main_mobile || 'Not Registered'}</code></td>
+                            <td><code>${user.main_invite_code || 'None'}</code></td>
+                            <td>${pwdInputHTML}</td>
+                            <td><span style="font-weight: 600;">${userAccounts.length} accounts</span></td>
+                            <td>${actionButtons}</td>
+                        `;
+                        tbody.appendChild(tr);
+                        
+                        const detailsTr = document.createElement('tr');
+                        detailsTr.id = `details-${user.user_id}`;
+                        detailsTr.className = 'details-row';
+                        
+                        let refCardsHTML = '';
+                        if (userAccounts.length === 0) {
+                            refCardsHTML = '<div style="color: var(--text-secondary); font-size: 0.85rem;">No WhatsApp accounts linked yet under this user.</div>';
+                        } else {
+                            refCardsHTML = '<div class="ref-grid">';
+                            userAccounts.forEach(acc => {
+                                const isOnline = acc.is_linked;
+                                refCardsHTML += `
+                                    <div class="ref-card">
+                                        <div class="ref-number">📱 ${acc.email}</div>
+                                        <div class="ref-meta">
+                                            <span>Invite: <code>${acc.invite_code}</code></span>
+                                            <span>
+                                                <span class="online-dot ${isOnline ? 'active' : ''}"></span>
+                                                ${isOnline ? 'ONLINE' : 'OFFLINE'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                            refCardsHTML += '</div>';
+                        }
+                        
+                        detailsTr.innerHTML = `
+                            <td colspan="9">
+                                <div class="details-container">
+                                    <div class="ref-title">
+                                        <span>Detailed WhatsApp Links</span>
+                                        <span>Invite Code used: <code>${user.main_invite_code || 'ZF5998'}</code></span>
+                                    </div>
+                                    ${refCardsHTML}
+                                </div>
+                            </td>
+                        `;
+                        tbody.appendChild(detailsTr);
+                    });
+                }
+
+                // 2. Populate Withdrawals Table
+                const wdTbody = document.getElementById('withdrawals-tbody');
+                wdTbody.innerHTML = '';
+                
+                if (!data.withdrawals || data.withdrawals.length === 0) {
+                    wdTbody.innerHTML = '<tr><td colspan="8" class="loading">No withdrawal requests found.</td></tr>';
+                } else {
+                    data.withdrawals.forEach(wd => {
+                        const tr = document.createElement('tr');
+                        
+                        let actionButtons = '';
+                        if (wd.status === 'pending') {
+                            actionButtons = `
+                                <div class="actions-cell">
+                                    <button class="btn btn-approve" onclick="actionWithdrawal(${wd.id}, 'approve')">Approve ✅</button>
+                                    <button class="btn btn-reject" onclick="actionWithdrawal(${wd.id}, 'reject')">Reject ❌</button>
+                                </div>
+                            `;
+                        } else {
+                            actionButtons = `<span style="color: var(--text-secondary); font-size: 0.8rem; font-weight: 500;">Processed</span>`;
+                        }
+                        
+                        const statusClass = wd.status === 'approved' ? 'status-approved' : (wd.status === 'rejected' ? 'status-rejected' : 'status-pending');
+                        const dateStr = new Date(wd.created_at).toLocaleString();
+                        
+                        tr.innerHTML = `
+                            <td><code>${wd.user_id}</code></td>
+                            <td><span style="font-weight: 600;">${wd.payment_method}</span></td>
+                            <td><code>${wd.payment_details}</code></td>
+                            <td><strong>${wd.amount_points}</strong></td>
+                            <td><strong style="color: #60a5fa;">$${wd.amount_usd}</strong></td>
+                            <td><span class="status-badge ${statusClass}">${wd.status.toUpperCase()}</span></td>
+                            <td style="font-size: 0.8rem; color: var(--text-secondary);">${dateStr}</td>
+                            <td>${actionButtons}</td>
+                        `;
+                        wdTbody.appendChild(tr);
+                    });
+                }
                 
             } catch (err) {
                 console.error("Error loading dashboard data:", err);
@@ -580,6 +652,21 @@ INDEX_HTML = """<!DOCTYPE html>
                 alert("Error: " + err);
             }
         }
+
+        async function actionWithdrawal(wdId, action) {
+            if (!confirm(`Are you sure you want to ${action} this withdrawal request?`)) return;
+            try {
+                const response = await fetch(`/api/withdrawals/${wdId}/${action}`, { method: 'POST' });
+                const res = await response.json();
+                if (res.success) {
+                    loadData();
+                } else {
+                    alert("Operation failed: " + res.message);
+                }
+            } catch (err) {
+                alert("Error calling withdrawal API: " + err);
+            }
+        }
         
         // Initial load and poll every 10 seconds
         loadData();
@@ -592,7 +679,7 @@ INDEX_HTML = """<!DOCTYPE html>
 # Native HTTP Basic Auth Middleware
 @web.middleware
 async def auth_middleware(request, handler):
-    # Skip auth for liveness/health probes
+    # Skip auth for liveness/health check probes
     if request.path in ('/health', '/healthz', '/api/ping'):
         return await handler(request)
         
@@ -610,7 +697,7 @@ async def auth_middleware(request, handler):
             db_user = admin_user.get("admin_panel_user") if admin_user else None
             db_pass = admin_user.get("admin_panel_pass") if admin_user else None
             
-            # Fallbacks if credentials have not been custom-configured yet
+            # Fallbacks if credentials have not been configured yet
             if not db_user:
                 db_user = "admin"
             if not db_pass:
@@ -637,19 +724,23 @@ async def get_users_api(request):
     try:
         users = await db.get_all_users_admin()
         accounts = await db.get_all_accounts_admin()
+        withdrawals = await db.get_all_withdrawals_admin()
         
         # Calculate stats
         total_users = len(users)
         pending_users = sum(1 for u in users if u.get("status") == "pending")
         total_linked_accounts = sum(1 for a in accounts if a.get("is_linked") is True)
+        pending_withdrawals = sum(1 for w in withdrawals if w.get("status") == "pending")
         
         return web.json_response({
             "users": users,
             "accounts": accounts,
+            "withdrawals": withdrawals,
             "stats": {
                 "total_users": total_users,
                 "pending_users": pending_users,
-                "total_linked_accounts": total_linked_accounts
+                "total_linked_accounts": total_linked_accounts,
+                "pending_withdrawals": pending_withdrawals
             }
         })
     except Exception as e:
@@ -714,6 +805,45 @@ async def post_admin_settings(request):
         logger.error(f"API Error updating admin settings: {e}")
         return web.json_response({"success": False, "message": str(e)}, status=500)
 
+async def post_withdrawal_action(request):
+    """Approves or rejects a withdrawal request from the web panel."""
+    wd_id = int(request.match_info['wd_id'])
+    action = request.match_info['action'] # approve or reject
+    
+    status_val = "approved" if action == "approve" else "rejected"
+    try:
+        wd = await db.get_withdrawal_by_id(wd_id)
+        if not wd:
+            return web.json_response({"success": False, "message": "Withdrawal request not found"}, status=404)
+            
+        if wd.get("status") != "pending":
+            return web.json_response({"success": False, "message": f"Withdrawal is already {wd.get('status')}"}, status=400)
+            
+        await db.update_withdrawal_status(wd_id, status_val)
+        
+        # Notify user on Telegram
+        from tg_bot import bot
+        try:
+            if status_val == "approved":
+                await bot.send_message(
+                    wd.get("user_id"),
+                    f"🎉 **Withdrawal Approved!**\n\n"
+                    f"Your request for `{wd.get('amount_points')} Points` (${wd.get('amount_usd')} USD) via **{wd.get('payment_method')}** has been approved and paid by the Admin!"
+                )
+            else:
+                await bot.send_message(
+                    wd.get("user_id"),
+                    f"❌ **Withdrawal Rejected**\n\n"
+                    f"Your request for `{wd.get('amount_points')} Points` (${wd.get('amount_usd')} USD) via **{wd.get('payment_method')}** was rejected by the Admin."
+                )
+        except Exception as notify_err:
+            logger.error(f"Failed to notify user {wd.get('user_id')} on web withdrawal action: {notify_err}")
+            
+        return web.json_response({"success": True})
+    except Exception as e:
+        logger.error(f"API Error updating withdrawal status from web: {e}")
+        return web.json_response({"success": False, "message": str(e)}, status=500)
+
 async def handle_ping(request):
     return web.Response(text="pong")
 
@@ -735,6 +865,7 @@ async def start_server():
     app.router.add_post('/api/users/{user_id}/{action}', post_user_action)
     app.router.add_post('/api/users/{user_id}/password', post_user_password)
     app.router.add_post('/api/admin/settings', post_admin_settings)
+    app.router.add_post('/api/withdrawals/{wd_id}/{action}', post_withdrawal_action)
     app.router.add_get('/api/ping', handle_ping)
     app.router.add_get('/health', handle_healthz)
     app.router.add_get('/healthz', handle_healthz)

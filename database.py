@@ -335,4 +335,65 @@ async def update_admin_credentials(username: str, password: str):
     )
 
 
+async def set_user_payment_details(user_id: int, method: str, details: str):
+    """Updates the user's payment method and number/address."""
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "users",
+        params={"user_id": f"eq.{int(user_id)}"},
+        json={"payment_method": method, "payment_details": details},
+        prefer="return=minimal",
+    )
+
+
+async def add_withdrawal_request(user_id: int, amount_points: int, amount_usd: float, method: str, details: str):
+    """Inserts a new pending withdrawal request."""
+    return await asyncio.to_thread(
+        _request,
+        "POST",
+        "withdrawals",
+        json=[{
+            "user_id": int(user_id),
+            "amount_points": int(amount_points),
+            "amount_usd": float(amount_usd),
+            "payment_method": method,
+            "payment_details": details,
+            "status": "pending"
+        }],
+        prefer="return=representation"
+    )
+
+
+async def update_withdrawal_status(wd_id: int, status: str):
+    """Updates the status of a specific withdrawal request."""
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "withdrawals",
+        params={"id": f"eq.{int(wd_id)}"},
+        json={"status": status},
+        prefer="return=minimal",
+    )
+
+
+async def get_withdrawal_by_id(wd_id: int):
+    """Fetches a specific withdrawal request details."""
+    return await asyncio.to_thread(
+        _fetch_first,
+        "withdrawals",
+        filters={"id": f"eq.{int(wd_id)}"},
+    )
+
+
+async def get_all_withdrawals_admin():
+    """Fetches all withdrawal requests for the admin panel."""
+    return await asyncio.to_thread(
+        _select,
+        "withdrawals",
+        order="id.desc",
+    )
+
+
+
 
