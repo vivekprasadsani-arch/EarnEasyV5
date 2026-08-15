@@ -38,6 +38,7 @@ class BotStates(StatesGroup):
     waiting_for_proxy = State()
     waiting_for_whatsapp_number = State()
     waiting_for_payment_details = State()
+    waiting_for_withdraw_amount = State()
 
 COUNTRIES = {
     "pakistan": "🇵🇰 Pakistan"
@@ -430,7 +431,7 @@ async def cmd_check_balance(message: Message):
             usd_val = 0.0
         await safe_edit_message(
             status_msg,
-            f"💵 **Your Balance:** `${usd_val:.2f} USD` ({balance} Points)",
+            f"💵 **Your Balance:** `${usd_val:.2f} USD`",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -598,7 +599,7 @@ async def handle_next_action(cq: CallbackQuery):
         pass
 
 @router.message(F.text == "📤 Withdraw")
-async def cmd_withdraw(message: Message):
+async def cmd_withdraw(message: Message, state: FSMContext):
     user_id = message.from_user.id
     if not await check_user_access(user_id, message.from_user.username or "", message.from_user.first_name, message):
         return
@@ -622,28 +623,82 @@ async def cmd_withdraw(message: Message):
     try:
         balance_points_str = await backend.get_main_account_balance(main_mobile, password, proxy)
         try:
-            balance_points = int(balance_points_str)
+            balance_points = float(balance_points_str)
         except Exception:
-            balance_points = 0
+            balance_points = 0.0
             
-        if balance_points < 4000:
-            usd_needed = (4000 * 0.05) / 278.0
-            usd_current = (balance_points * 0.05) / 278.0
+        usd_current = (balance_points * 0.05) / 278.0
+        
+        # Minimum total balance needed to withdraw $0.40 is $0.50 ($0.40 + $0.10 fee)
+        if usd_current < 0.5:
             await safe_edit_message(
                 status_msg, 
                 f"❌ **Withdrawal Failed**\n\n"
-                f"Minimum withdrawal threshold is **4000 Points** (${usd_needed:.2f} USD).\n"
-                f"Your current balance: **{balance_points} Points** (${usd_current:.2f} USD)."
+                f"Minimum withdrawal is **$0.40 USD**, which requires at least **$0.50 USD** in your account (including a **$0.10 USD** fee).\n\n"
+                f"Your current balance: **${usd_current:.2f} USD**"
             )
             return
             
-        # Calculate USD
-        usd_val = (float(balance_points) * 0.05) / 278.0
+        await state.update_data(max_usd=usd_current)
+        await status_msg.delete()
         
-        # Insert withdrawal request in DB
-        inserted = await db.add_withdrawal_request(user_id, balance_points, usd_val, pay_method, pay_details)
+        await message.answer(
+            f"📤 **Enter withdrawal amount in USD** (e.g. 0.50):\n\n"
+            f"💵 **Your current balance:** `${usd_current:.2f} USD`\n"
+            f"💳 **Minimum withdrawal:** `$0.40 USD`\n"
+            f"⚡ **Withdrawal fee:** `$0.10 USD` (added to requested amount)\n\n"
+            f"Please reply with the amount you want to withdraw:",
+            reply_markup=ForceReply(),
+            parse_mode="Markdown"
+        )
+        await state.set_state(BotStates.waiting_for_withdraw_amount)
         
-        # Get inserted request ID
+    except Exception as e:
+        logger.error(f"Withdrawal balance check failed: {e}")
+        await safe_edit_message(status_msg, f"❌ Failed to query balance: {str(e)}")
+
+@router.message(BotStates.waiting_for_withdraw_amount)
+async def process_withdraw_amount(message: Message, state: FSMContext):
+    input_text = message.text.strip()
+    try:
+        amount_usd = float(input_text)
+    except ValueError:
+        await message.answer("❌ Invalid amount format. Please enter a number (e.g. 0.50):")
+        return
+        
+    if amount_usd < 0.4:
+        await message.answer("❌ Minimum withdrawal amount is **$0.40 USD**. Please enter a valid amount:")
+        return
+        
+    state_data = await state.get_data()
+    max_usd = state_data.get("max_usd", 0.0)
+    
+    total_needed = amount_usd + 0.1
+    if total_needed > max_usd:
+        await message.answer(
+            f"❌ **Insufficient Balance**\n\n"
+            f"To withdraw **${amount_usd:.2f} USD**, you need at least **${total_needed:.2f} USD** (including the **$0.10 USD** fee).\n"
+            f"Your current balance: **${max_usd:.2f} USD**\n\n"
+            f"Please enter a lower amount:"
+        )
+        return
+        
+    # Clear FSM state
+    await state.clear()
+    
+    user_id = message.from_user.id
+    user = await db.get_user(user_id)
+    pay_method = user.get("payment_method")
+    pay_details = user.get("payment_details")
+    
+    # Convert total points to deduct: (amount_usd + 0.1) * 5560
+    points_to_deduct = int(total_needed * 5560.0)
+    
+    status_msg = await message.answer("🔄 Submitting withdrawal request...")
+    try:
+        # Insert request in DB: amount_points = points_to_deduct, amount_usd = amount_usd (what they receive)
+        inserted = await db.add_withdrawal_request(user_id, points_to_deduct, amount_usd, pay_method, pay_details)
+        
         wd_id = 0
         if inserted and isinstance(inserted, list) and len(inserted) > 0:
             wd_id = inserted[0].get("id", 0)
@@ -661,7 +716,8 @@ async def cmd_withdraw(message: Message):
                     f"User ID: `{user_id}`\n"
                     f"Name: {message.from_user.first_name}\n"
                     f"Username: @{message.from_user.username or 'None'}\n"
-                    f"Amount: `{balance_points} Points` (${usd_val:.2f} USD)\n"
+                    f"Amount to User: `${amount_usd:.2f} USD` (Net)\n"
+                    f"Total points to deduct: `{points_to_deduct} Points` (${total_needed:.2f} USD Gross)\n"
                     f"Payment Method: **{pay_method}**\n"
                     f"Payment Details: `{pay_details}`",
                     reply_markup=kb
@@ -672,15 +728,16 @@ async def cmd_withdraw(message: Message):
         await safe_edit_message(
             status_msg,
             f"✅ **Withdrawal Request Submitted!**\n\n"
-            f"Requested: `{balance_points} Points` (${usd_val:.2f} USD)\n"
+            f"Requested Amount: `${amount_usd:.2f} USD`\n"
+            f"Fee: `$0.10 USD`\n"
+            f"Total Deducted: `${total_needed:.2f} USD`\n"
             f"Method: **{pay_method}**\n"
             f"Details: `{pay_details}`\n\n"
-            f"⏳ Your request is currently pending admin approval and processing."
+            f"⏳ Your request is pending admin approval."
         )
-        
     except Exception as e:
-        logger.error(f"Withdrawal request failed: {e}")
-        await safe_edit_message(status_msg, f"❌ Failed to request withdrawal: {str(e)}")
+        logger.error(f"Failed to record withdrawal: {e}")
+        await safe_edit_message(status_msg, f"❌ Failed to submit request: {str(e)}")
 
 @router.callback_query(F.data.startswith("wd_approve_"))
 async def approve_withdrawal_cb(cq: CallbackQuery):
