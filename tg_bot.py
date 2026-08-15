@@ -183,8 +183,22 @@ async def cmd_start(message: Message):
                 login_res = client.login(main_mobile, "53561106@Roni")
                 if login_res.get("code") != 200:
                     raise RuntimeError("Login to fetch invite code failed")
-                info_res = client.user_info()
-                main_invite_code = info_res.get("data", {}).get("invite_code")
+                
+                # Fetch user's own invite code
+                try:
+                    invite_info_res = client.user_invite_info()
+                    logger.info(f"inviteInfo response for start: {invite_info_res}")
+                    invite_data = invite_info_res.get("data", {})
+                    main_invite_code = invite_data.get("invite_code") or invite_data.get("code")
+                except Exception as invite_err:
+                    logger.warning(f"Failed to fetch inviteInfo on start: {invite_err}")
+                    main_invite_code = None
+                    
+                # Fallback to info_res
+                if not main_invite_code:
+                    info_res = client.user_info()
+                    main_invite_code = info_res.get("data", {}).get("invite_code")
+                    
                 if not main_invite_code:
                     raise RuntimeError("Failed to fetch invite code")
             finally:
@@ -408,8 +422,22 @@ async def cmd_check_balance(message: Message):
                 login_res = client.login(main_mobile, password)
                 if login_res.get("code") != 200:
                     raise RuntimeError("Login to fetch invite code failed")
-                info_res = client.user_info()
-                main_invite_code = info_res.get("data", {}).get("invite_code")
+                
+                # Fetch user's own invite code
+                try:
+                    invite_info_res = client.user_invite_info()
+                    logger.info(f"inviteInfo response for balance check: {invite_info_res}")
+                    invite_data = invite_info_res.get("data", {})
+                    main_invite_code = invite_data.get("invite_code") or invite_data.get("code")
+                except Exception as invite_err:
+                    logger.warning(f"Failed to fetch inviteInfo on balance check: {invite_err}")
+                    main_invite_code = None
+                    
+                # Fallback to info_res
+                if not main_invite_code:
+                    info_res = client.user_info()
+                    main_invite_code = info_res.get("data", {}).get("invite_code")
+                    
                 if not main_invite_code:
                     raise RuntimeError("Failed to fetch invite code")
             finally:
@@ -495,8 +523,22 @@ async def start_pairing_flow(message: Message, user_id: int, wa_phone: str, mess
                 login_res = client.login(main_mobile, password)
                 if login_res.get("code") != 200:
                     raise RuntimeError("Login to fetch invite code failed")
-                info_res = client.user_info()
-                main_invite_code = info_res.get("data", {}).get("invite_code")
+                
+                # Fetch user's own invite code
+                try:
+                    invite_info_res = client.user_invite_info()
+                    logger.info(f"inviteInfo response for pairing flow: {invite_info_res}")
+                    invite_data = invite_info_res.get("data", {})
+                    main_invite_code = invite_data.get("invite_code") or invite_data.get("code")
+                except Exception as invite_err:
+                    logger.warning(f"Failed to fetch inviteInfo on pairing flow: {invite_err}")
+                    main_invite_code = None
+                    
+                # Fallback to info_res
+                if not main_invite_code:
+                    info_res = client.user_info()
+                    main_invite_code = info_res.get("data", {}).get("invite_code")
+                    
                 if not main_invite_code:
                     raise RuntimeError("Failed to fetch invite code")
             finally:

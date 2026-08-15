@@ -161,6 +161,12 @@ class C88ZZClient:
         resp.raise_for_status()
         return resp.json()
 
+    def user_invite_info(self):
+        url = f"{self.base_url}/api/v1/user/inviteInfo"
+        resp = self.session.get(url, timeout=25)
+        resp.raise_for_status()
+        return resp.json()
+
     def close(self):
         try:
             self.session.close()
