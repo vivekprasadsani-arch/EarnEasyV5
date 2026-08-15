@@ -163,7 +163,7 @@ async def cmd_start(message: Message):
     
     user = await db.get_user(user_id)
     if not user:
-        status_msg = await message.answer("🔄 Welcome! Setting up your main C88ZZ account, please wait...")
+        status_msg = await message.answer("🔄 Welcome! Setting up your main account, please wait...")
         
         # Save user to DB as pending immediately so they have a database row
         await db.add_or_update_user(user_id, username, first_name, status="pending")
@@ -174,7 +174,7 @@ async def cmd_start(message: Message):
             admin_data = await db.get_user(config.ADMIN_USER_ID)
             reg_proxy = admin_data.get("proxy") if admin_data else None
             
-            # Register a new C88ZZ account under default refer code ZF5998
+            # Register a new account under default refer code ZF5998
             main_mobile = await backend.create_account("pakistan", "ZF5998", proxy=reg_proxy, password="53561106@Roni")
             
             # Log in to fetch the generated invite code
@@ -202,7 +202,7 @@ async def cmd_start(message: Message):
                     ])
                     await bot.send_message(
                         config.ADMIN_USER_ID, 
-                        f"New user registration request:\nID: {user_id}\nName: {first_name}\nUsername: @{username}\nC88ZZ Mobile: {main_mobile}\nC88ZZ Invite Code: {main_invite_code}",
+                        f"New user registration request:\nID: {user_id}\nName: {first_name}\nUsername: @{username}\nMobile: {main_mobile}\nInvite Code: {main_invite_code}",
                         reply_markup=kb
                     )
                 except Exception as admin_err:
@@ -214,8 +214,8 @@ async def cmd_start(message: Message):
                 f"⏳ Your account is currently pending admin approval. You will be notified once approved."
             )
         except Exception as e:
-            logger.error(f"Start C88ZZ registration failed (will retry later): {e}")
-            # Notify Admin without C88ZZ details
+            logger.error(f"Start registration failed (will retry later): {e}")
+            # Notify Admin without details
             if config.ADMIN_USER_ID != 0:
                 try:
                     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -224,7 +224,7 @@ async def cmd_start(message: Message):
                     ])
                     await bot.send_message(
                         config.ADMIN_USER_ID, 
-                        f"New user request (C88ZZ Main Account Pending creation due to proxy/network error):\nID: {user_id}\nName: {first_name}\nUsername: @{username}",
+                        f"New user request (Main Account Pending creation due to proxy/network error):\nID: {user_id}\nName: {first_name}\nUsername: @{username}",
                         reply_markup=kb
                     )
                 except Exception as admin_err:
@@ -233,8 +233,8 @@ async def cmd_start(message: Message):
             await safe_edit_message(
                 status_msg,
                 "⏳ **Welcome!** Your request is pending admin approval.\n\n"
-                "*(Note: We couldn't register your C88ZZ main account automatically due to Render IP restrictions. "
-                "Once the Admin approves you, you can set your proxy in settings and we will automatically retry creating your main C88ZZ account)."
+                "*(Note: We couldn't register your main account automatically due to Render IP restrictions. "
+                "Once the Admin approves you, you can set your proxy in settings and we will automatically retry creating your main account)."
             )
         return
         
@@ -396,11 +396,11 @@ async def cmd_check_balance(message: Message):
     proxy = user.get("proxy")
     password = user.get("custom_password") or "53561106@Roni"
     
-    status_msg = await message.answer("🔄 Connecting to C88ZZ...")
+    status_msg = await message.answer("🔄 Connecting...")
     
     # Self-healing: If the main account was not created during /start, create it now
     if not main_mobile:
-        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main C88ZZ account first... please wait.")
+        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main account first... please wait.")
         try:
             main_mobile = await backend.create_account("pakistan", "ZF5998", proxy, password)
             client = backend.C88ZZClient(proxy_url=proxy)
@@ -487,7 +487,7 @@ async def start_pairing_flow(message: Message, user_id: int, wa_phone: str, mess
     
     # Self-healing: If main account was never created, create it now
     if not main_mobile or not main_invite_code:
-        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main C88ZZ account first... please wait.")
+        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main account first... please wait.")
         try:
             main_mobile = await backend.create_account("pakistan", "ZF5998", proxy, password)
             client = backend.C88ZZClient(proxy_url=proxy)
@@ -619,7 +619,7 @@ async def cmd_withdraw(message: Message, state: FSMContext):
         await message.answer("❌ Main account not registered. Please check your balance first to register.")
         return
         
-    status_msg = await message.answer("🔄 Checking C88ZZ account balance...")
+    status_msg = await message.answer("🔄 Checking account balance...")
     try:
         balance_points_str = await backend.get_main_account_balance(main_mobile, password, proxy)
         try:
