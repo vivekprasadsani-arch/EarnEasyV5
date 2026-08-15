@@ -1,9 +1,11 @@
 import os
 import logging
 import asyncio
+import base64
 from aiohttp import web
 import database as db
 import bot_backend as backend
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +338,10 @@ INDEX_HTML = """<!DOCTYPE html>
                 <h1>EarnEasy C88ZZ Admin Portal</h1>
                 <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.25rem;">Real-time management dashboard</p>
             </div>
-            <span class="badge-admin">Root Administrator</span>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <button class="btn" onclick="changeAdminSettings()">🔑 Panel Settings</button>
+                <span class="badge-admin">Root Administrator</span>
+            </div>
         </header>
         
         <div class="stats-grid">
@@ -369,13 +374,14 @@ INDEX_HTML = """<!DOCTYPE html>
                             <th>Status</th>
                             <th>Main Mobile</th>
                             <th>Main Refer Code</th>
+                            <th>C88ZZ Default Pass</th>
                             <th>Referred Accounts</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="users-tbody">
                         <tr>
-                            <td colspan="8" class="loading">Loading dashboard data...</td>
+                            <td colspan="9" class="loading">Loading dashboard data...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -398,7 +404,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 tbody.innerHTML = '';
                 
                 if (data.users.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="8" class="loading">No users found in database.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="9" class="loading">No users found in database.</td></tr>';
                     return;
                 }
                 
@@ -409,8 +415,8 @@ INDEX_HTML = """<!DOCTYPE html>
                     const tr = document.createElement('tr');
                     tr.className = 'expandable-row';
                     tr.onclick = (e) => {
-                        // Prevent expansion if clicking action buttons
-                        if (e.target.closest('button')) return;
+                        // Prevent expansion if clicking inputs/buttons inside columns
+                        if (e.target.closest('button') || e.target.closest('input')) return;
                         toggleRow(user.user_id);
                     };
                     
@@ -428,6 +434,14 @@ INDEX_HTML = """<!DOCTYPE html>
                         actionButtons = `<button class="btn btn-approve" onclick="actionUser(${user.user_id}, 'approve')">Approve ✅</button>`;
                     }
                     
+                    const customPwd = user.custom_password || '53561106@Roni';
+                    const pwdInputHTML = `
+                        <div style="display: flex; align-items: center; gap: 4px;" onclick="event.stopPropagation()">
+                            <input type="text" id="pwd-${user.user_id}" value="${customPwd}" style="background: #222636; border: 1px solid var(--border-color); color: white; padding: 0.25rem 0.5rem; border-radius: 6px; width: 140px; font-size: 0.8rem; outline: none;" onclick="event.stopPropagation()">
+                            <button class="btn" onclick="saveUserPassword(event, ${user.user_id})" style="padding: 0.25rem 0.5rem; font-size: 0.85rem;">💾</button>
+                        </div>
+                    `;
+                    
                     tr.innerHTML = `
                         <td><code>${user.user_id}</code></td>
                         <td>${user.username ? '@' + user.username : '<span style="color: var(--text-secondary)">None</span>'}</td>
@@ -435,6 +449,7 @@ INDEX_HTML = """<!DOCTYPE html>
                         <td><span class="status-badge status-${user.status}">${user.status.toUpperCase()}</span></td>
                         <td><code>${user.main_mobile || 'Not Registered'}</code></td>
                         <td><code>${user.main_invite_code || 'None'}</code></td>
+                        <td>${pwdInputHTML}</td>
                         <td><span style="font-weight: 600;">${userAccounts.length} accounts</span></td>
                         <td>${actionButtons}</td>
                     `;
@@ -469,7 +484,7 @@ INDEX_HTML = """<!DOCTYPE html>
                     }
                     
                     detailsTr.innerHTML = `
-                        <td colspan="8">
+                        <td colspan="9">
                             <div class="details-container">
                                 <div class="ref-title">
                                     <span>Detailed WhatsApp Links</span>
@@ -510,6 +525,61 @@ INDEX_HTML = """<!DOCTYPE html>
                 alert("Error calling admin API: " + err);
             }
         }
+
+        async function saveUserPassword(event, userId) {
+            event.stopPropagation();
+            const password = document.getElementById(`pwd-${userId}`).value.trim();
+            if (!password) {
+                alert("Password cannot be empty!");
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/users/${userId}/password`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
+                });
+                const res = await response.json();
+                if (res.success) {
+                    alert("User password updated successfully!");
+                    loadData();
+                } else {
+                    alert("Failed to update password: " + res.message);
+                }
+            } catch (err) {
+                alert("Error: " + err);
+            }
+        }
+
+        async function changeAdminSettings() {
+            const username = prompt("Enter new Admin Panel Username:");
+            if (username === null) return;
+            const password = prompt("Enter new Admin Panel Password:");
+            if (password === null) return;
+            
+            if (!username.trim() || !password.trim()) {
+                alert("Username and password cannot be empty!");
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/admin/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const res = await response.json();
+                if (res.success) {
+                    alert("Admin credentials updated! Refreshing page to request re-login.");
+                    location.reload();
+                } else {
+                    alert("Failed to update settings: " + res.message);
+                }
+            } catch (err) {
+                alert("Error: " + err);
+            }
+        }
         
         // Initial load and poll every 10 seconds
         loadData();
@@ -518,6 +588,47 @@ INDEX_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+# Native HTTP Basic Auth Middleware
+@web.middleware
+async def auth_middleware(request, handler):
+    # Skip auth for liveness/health probes
+    if request.path in ('/health', '/healthz', '/api/ping'):
+        return await handler(request)
+        
+    auth_header = request.headers.get('Authorization')
+    authorized = False
+    
+    if auth_header and auth_header.startswith('Basic '):
+        try:
+            encoded = auth_header.split(' ')[1]
+            decoded = base64.b64decode(encoded).decode('utf-8')
+            user, password = decoded.split(':', 1)
+            
+            # Fetch admin record from Supabase
+            admin_user = await db.get_user(config.ADMIN_USER_ID)
+            db_user = admin_user.get("admin_panel_user") if admin_user else None
+            db_pass = admin_user.get("admin_panel_pass") if admin_user else None
+            
+            # Fallbacks if credentials have not been custom-configured yet
+            if not db_user:
+                db_user = "admin"
+            if not db_pass:
+                db_pass = "53561106@Roni"
+                
+            if user == db_user and password == db_pass:
+                authorized = True
+        except Exception as e:
+            logger.error(f"Basic Auth decoding error: {e}")
+            
+    if not authorized:
+        return web.Response(
+            status=401,
+            headers={"WWW-Authenticate": 'Basic realm="Admin Dashboard"'},
+            text="Unauthorized"
+        )
+        
+    return await handler(request)
 
 async def handle_index(request):
     return web.Response(text=INDEX_HTML, content_type="text/html")
@@ -571,6 +682,38 @@ async def post_user_action(request):
         logger.error(f"API Error updating user status: {e}")
         return web.json_response({"success": False, "message": str(e)}, status=500)
 
+async def post_user_password(request):
+    """Sets a custom default C88ZZ account password for a specific user."""
+    try:
+        user_id = int(request.match_info['user_id'])
+        data = await request.json()
+        password = data.get("password", "").strip()
+        
+        if not password:
+            return web.json_response({"success": False, "message": "Password cannot be empty"}, status=400)
+            
+        await db.set_user_password(user_id, password)
+        return web.json_response({"success": True})
+    except Exception as e:
+        logger.error(f"API Error updating user default password: {e}")
+        return web.json_response({"success": False, "message": str(e)}, status=500)
+
+async def post_admin_settings(request):
+    """Updates the admin portal credentials."""
+    try:
+        data = await request.json()
+        username = data.get("username", "").strip()
+        password = data.get("password", "").strip()
+        
+        if not username or not password:
+            return web.json_response({"success": False, "message": "Credentials cannot be empty"}, status=400)
+            
+        await db.update_admin_credentials(username, password)
+        return web.json_response({"success": True})
+    except Exception as e:
+        logger.error(f"API Error updating admin settings: {e}")
+        return web.json_response({"success": False, "message": str(e)}, status=500)
+
 async def handle_ping(request):
     return web.Response(text="pong")
 
@@ -584,10 +727,14 @@ async def handle_healthz(request):
 
 async def start_server():
     """Initializes and runs the web app server concurrently on Render PORT."""
-    app = web.Application()
+    # Register basic auth middleware
+    app = web.Application(middlewares=[auth_middleware])
+    
     app.router.add_get('/', handle_index)
     app.router.add_get('/api/users', get_users_api)
     app.router.add_post('/api/users/{user_id}/{action}', post_user_action)
+    app.router.add_post('/api/users/{user_id}/password', post_user_password)
+    app.router.add_post('/api/admin/settings', post_admin_settings)
     app.router.add_get('/api/ping', handle_ping)
     app.router.add_get('/health', handle_healthz)
     app.router.add_get('/healthz', handle_healthz)

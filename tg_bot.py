@@ -161,12 +161,21 @@ async def cmd_start(message: Message):
     user = await db.get_user(user_id)
     if not user:
         status_msg = await message.answer("🔄 Welcome! Setting up your main C88ZZ account, please wait...")
+        
+        # Save user to DB as pending immediately so they have a database row
+        await db.add_or_update_user(user_id, username, first_name, status="pending")
+        await db.update_user_last_request(user_id)
+        
         try:
+            # Fetch admin's proxy to use as the registration proxy
+            admin_data = await db.get_user(config.ADMIN_USER_ID)
+            reg_proxy = admin_data.get("proxy") if admin_data else None
+            
             # Register a new C88ZZ account under default refer code ZF5998
-            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy=None, password="53561106@Roni")
+            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy=reg_proxy, password="53561106@Roni")
             
             # Log in to fetch the generated invite code
-            client = backend.C88ZZClient()
+            client = backend.C88ZZClient(proxy_url=reg_proxy)
             try:
                 login_res = client.login(main_mobile, "53561106@Roni")
                 if login_res.get("code") != 200:
@@ -178,10 +187,8 @@ async def cmd_start(message: Message):
             finally:
                 client.close()
                 
-            # Create user in database
-            await db.add_or_update_user(user_id, username, first_name, status="pending")
+            # Update user in database with main account details
             await db.update_user_main_account(user_id, main_mobile, main_invite_code)
-            await db.update_user_last_request(user_id)
             
             # Notify Admin
             if config.ADMIN_USER_ID != 0:
@@ -205,8 +212,28 @@ async def cmd_start(message: Message):
                 f"⏳ Your account is currently pending admin approval. You will be notified once approved."
             )
         except Exception as e:
-            logger.error(f"Start registration failed: {e}")
-            await safe_edit_message(status_msg, "❌ Failed to automatically register your main account. Please type /start to retry.")
+            logger.error(f"Start C88ZZ registration failed (will retry later): {e}")
+            # Notify Admin without C88ZZ details
+            if config.ADMIN_USER_ID != 0:
+                try:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="Approve ✅", callback_data=f"approve_{user_id}"),
+                         InlineKeyboardButton(text="Reject ❌", callback_data=f"reject_{user_id}")]
+                    ])
+                    await bot.send_message(
+                        config.ADMIN_USER_ID, 
+                        f"New user request (C88ZZ Main Account Pending creation due to proxy/network error):\nID: {user_id}\nName: {first_name}\nUsername: @{username}",
+                        reply_markup=kb
+                    )
+                except Exception as admin_err:
+                    logger.error(f"Failed to notify admin on start: {admin_err}")
+                    
+            await safe_edit_message(
+                status_msg,
+                "⏳ **Welcome!** Your request is pending admin approval.\n\n"
+                "*(Note: We couldn't register your C88ZZ main account automatically due to Render IP restrictions. "
+                "Once the Admin approves you, you can set your proxy in settings and we will automatically retry creating your main C88ZZ account)."
+            )
         return
         
     has_access = await check_user_access(user_id, username, first_name, message)
@@ -313,14 +340,36 @@ async def cmd_check_balance(message: Message):
     main_mobile = user.get("main_mobile")
     main_invite_code = user.get("main_invite_code")
     proxy = user.get("proxy")
+    password = user.get("custom_password") or "53561106@Roni"
     
+    status_msg = await message.answer("🔄 Connecting to C88ZZ...")
+    
+    # Self-healing: If the main account was not created during /start, create it now
     if not main_mobile:
-        await message.answer("❌ Main account not registered. Please type /start to create your main account.")
-        return
-        
-    status_msg = await message.answer("🔄 Fetching balance from your main account...")
+        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main C88ZZ account first... please wait.")
+        try:
+            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy, password)
+            client = backend.C88ZZClient(proxy_url=proxy)
+            try:
+                login_res = client.login(main_mobile, password)
+                if login_res.get("code") != 200:
+                    raise RuntimeError("Login to fetch invite code failed")
+                info_res = client.user_info()
+                main_invite_code = info_res.get("data", {}).get("invite_code")
+                if not main_invite_code:
+                    raise RuntimeError("Failed to fetch invite code")
+            finally:
+                client.close()
+                
+            await db.update_user_main_account(user_id, main_mobile, main_invite_code)
+            status_msg = await safe_edit_message(status_msg, "🔄 Main account registered successfully. Fetching balance...")
+        except Exception as e:
+            logger.error(f"Balance check auto-registration failed: {e}")
+            await safe_edit_message(status_msg, f"❌ Failed to register main account: {str(e)}\n\n*(Hint: If you need a proxy to register, please check settings).*")
+            return
+            
     try:
-        balance = await backend.get_main_account_balance(main_mobile, "53561106@Roni", proxy)
+        balance = await backend.get_main_account_balance(main_mobile, password, proxy)
         await safe_edit_message(
             status_msg,
             f"👤 **Main Account details**\n\n"
@@ -376,21 +425,47 @@ async def start_pairing_flow(message: Message, user_id: int, wa_phone: str, mess
     
     user_data = await db.get_user(user_id)
     proxy = user_data['proxy']
-    main_invite_code = user_data.get('main_invite_code') or "ZF5998"
+    password = user_data.get("custom_password") or "53561106@Roni"
+    main_invite_code = user_data.get('main_invite_code')
+    main_mobile = user_data.get('main_mobile')
     
+    # Self-healing: If main account was never created, create it now
+    if not main_mobile or not main_invite_code:
+        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main C88ZZ account first... please wait.")
+        try:
+            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy, password)
+            client = backend.C88ZZClient(proxy_url=proxy)
+            try:
+                login_res = client.login(main_mobile, password)
+                if login_res.get("code") != 200:
+                    raise RuntimeError("Login to fetch invite code failed")
+                info_res = client.user_info()
+                main_invite_code = info_res.get("data", {}).get("invite_code")
+                if not main_invite_code:
+                    raise RuntimeError("Failed to fetch invite code")
+            finally:
+                client.close()
+                
+            await db.update_user_main_account(user_id, main_mobile, main_invite_code)
+            status_msg = await safe_edit_message(status_msg, "🔄 Main account registered successfully. Preparing referral account...")
+        except Exception as e:
+            logger.error(f"Linking flow auto-registration failed: {e}")
+            await safe_edit_message(status_msg, f"❌ Failed to register main account: {str(e)}\n\n*(Hint: If you need a proxy to register, please check settings).*")
+            return
+
     try:
         # Create a new C88ZZ referral account registered under the user's main invite code
-        new_mobile = await backend.create_account("pakistan", main_invite_code, proxy, "53561106@Roni")
-        await db.add_account(user_id, "pakistan", new_mobile, "53561106@Roni", main_invite_code)
+        new_mobile = await backend.create_account("pakistan", main_invite_code, proxy, password)
+        await db.add_account(user_id, "pakistan", new_mobile, password, main_invite_code)
                 
         status_msg = await safe_edit_message(
             status_msg,
-            f"🔄 Account created. Requesting linking code for `{wa_phone}`...",
+            f"🔄 Account prepared. Requesting linking code for `{wa_phone}`...",
             parse_mode="Markdown"
         )
         
         # Start link and get pairing code
-        client, session_id, pair_code = await backend.start_whatsapp_link(new_mobile, "53561106@Roni", proxy, wa_phone)
+        client, session_id, pair_code = await backend.start_whatsapp_link(new_mobile, password, proxy, wa_phone)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Copy Code", switch_inline_query=pair_code)]

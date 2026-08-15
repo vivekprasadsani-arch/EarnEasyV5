@@ -323,3 +323,16 @@ async def get_all_accounts_admin():
     )
 
 
+async def update_admin_credentials(username: str, password: str):
+    """Updates the admin panel username and password."""
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "users",
+        params={"user_id": f"eq.{int(config.ADMIN_USER_ID)}"},
+        json={"admin_panel_user": username, "admin_panel_pass": password},
+        prefer="return=minimal",
+    )
+
+
+
