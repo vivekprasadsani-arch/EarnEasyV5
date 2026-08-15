@@ -6,8 +6,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, 
-                           InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, 
-                           ForceReply, InputMediaPhoto, BotCommand)
+                           InlineKeyboardMarkup, InlineKeyboardButton, ForceReply, BotCommand)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart, Command
@@ -34,12 +33,9 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
-BD_TZ = ZoneInfo("Asia/Dhaka")
 
 class BotStates(StatesGroup):
-    waiting_for_invite = State()
     waiting_for_proxy = State()
-    waiting_for_password = State()
     waiting_for_whatsapp_number = State()
 
 COUNTRIES = {
@@ -50,7 +46,7 @@ def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📱 Add WhatsApp")],
-            [KeyboardButton(text="👤 My Account"), KeyboardButton(text="⚙️ Settings")]
+            [KeyboardButton(text="💵 Check Balance"), KeyboardButton(text="⚙️ Settings")]
         ],
         resize_keyboard=True,
         is_persistent=True
@@ -58,15 +54,12 @@ def main_keyboard():
 
 async def setup_bot_commands():
     await bot.set_my_commands([
-        BotCommand(command="start", description="Open the main menu"),
-        BotCommand(command="setpassword", description="Set your default account password"),
+        BotCommand(command="start", description="Start/Register main account"),
     ])
-
 
 async def safe_edit_message(message: Message, text: str, parse_mode: str = None):
     try:
-        await message.edit_text(text, parse_mode=parse_mode)
-        return message
+        return await message.edit_text(text, parse_mode=parse_mode)
     except Exception:
         return await message.answer(text, parse_mode=parse_mode)
 
@@ -78,44 +71,9 @@ async def safe_delete_message(message: Message):
 
 async def safe_answer_callback(cq: CallbackQuery, text: str = None, show_alert: bool = False):
     try:
-        await cq.answer(text=text, show_alert=show_alert)
+        await cq.answer(text, show_alert=show_alert)
     except Exception:
         pass
-
-def format_bd_datetime(value: str) -> str:
-    if not value:
-        return "Unknown"
-    if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return dt.astimezone(BD_TZ).strftime("%d %b %Y, %I:%M %p")
-    try:
-        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        return dt.astimezone(BD_TZ).strftime("%d %b %Y, %I:%M %p")
-    except ValueError:
-        return value
-
-def parse_bd_datetime(value: str):
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return dt.astimezone(BD_TZ)
-    try:
-        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        return dt.astimezone(BD_TZ)
-    except ValueError:
-        return None
-
-def format_bd_group_label(dt):
-    if not dt:
-        return "Unknown Date"
-    today = datetime.now(BD_TZ).date()
-    target = dt.date()
-    if target == today:
-        return f"Today - {dt.strftime('%d %b %Y')}"
-    if target == today - timedelta(days=1):
-        return f"Yesterday - {dt.strftime('%d %b %Y')}"
-    return dt.strftime("%d %b %Y")
 
 async def check_user_access(user_id: int, username: str, first_name: str, message_to_reply=None) -> bool:
     if user_id == config.ADMIN_USER_ID:
@@ -127,26 +85,7 @@ async def check_user_access(user_id: int, username: str, first_name: str, messag
 
     user = await db.get_user(user_id)
     if not user:
-        await db.add_or_update_user(user_id, username, first_name, status="pending")
-        if config.ADMIN_USER_ID != 0:
-            try:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Approve ✅", callback_data=f"approve_{user_id}"),
-                     InlineKeyboardButton(text="Reject ❌", callback_data=f"reject_{user_id}")]
-                ])
-                await bot.send_message(
-                    config.ADMIN_USER_ID, 
-                    f"New user request:\nID: {user_id}\nName: {first_name}\nUsername: @{username}",
-                    reply_markup=kb
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin: {e}")
-                
-        if message_to_reply:
-            if isinstance(message_to_reply, Message):
-                await message_to_reply.answer("⏳ Your account is pending admin approval. Please wait.")
-            elif isinstance(message_to_reply, CallbackQuery):
-                await message_to_reply.answer("⏳ Account pending approval.", show_alert=True)
+        # User must type /start first which handles creation
         return False
         
     if user['status'] == 'rejected':
@@ -158,25 +97,121 @@ async def check_user_access(user_id: int, username: str, first_name: str, messag
         return False
         
     if user['status'] == 'pending':
-        if message_to_reply:
-            if isinstance(message_to_reply, Message):
-                await message_to_reply.answer("⏳ Your account is still pending admin approval. Please wait.")
-            elif isinstance(message_to_reply, CallbackQuery):
-                await message_to_reply.answer("⏳ Account pending.", show_alert=True)
+        import datetime
+        last_req_str = user.get('last_request_at')
+        can_request_again = False
+        time_diff_msg = ""
+        
+        if not last_req_str:
+            can_request_again = True
+        else:
+            try:
+                last_req = datetime.datetime.fromisoformat(last_req_str.replace("Z", "+00:00"))
+                now = datetime.datetime.now(timezone.utc)
+                diff = now - last_req
+                if diff.total_seconds() >= 3600:
+                    can_request_again = True
+                else:
+                    remaining_seconds = 3600 - diff.total_seconds()
+                    remaining_minutes = int(remaining_seconds // 60)
+                    time_diff_msg = f"\n⏳ You can send another request in {remaining_minutes} minutes."
+            except Exception as e:
+                logger.error(f"Error parsing last_request_at: {e}")
+                can_request_again = True
+                
+        if can_request_again:
+            await db.update_user_last_request(user_id)
+            if config.ADMIN_USER_ID != 0:
+                try:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="Approve ✅", callback_data=f"approve_{user_id}"),
+                         InlineKeyboardButton(text="Reject ❌", callback_data=f"reject_{user_id}")]
+                    ])
+                    await bot.send_message(
+                        config.ADMIN_USER_ID, 
+                        f"Reminder: User request still pending:\nID: {user_id}\nName: {first_name}\nUsername: @{username}",
+                        reply_markup=kb
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify admin: {e}")
+            
+            if message_to_reply:
+                msg_text = "⏳ Your account is pending admin approval. A reminder has been sent to the admin. Please wait."
+                if isinstance(message_to_reply, Message):
+                    await message_to_reply.answer(msg_text)
+                elif isinstance(message_to_reply, CallbackQuery):
+                    await message_to_reply.answer(msg_text, show_alert=True)
+        else:
+            if message_to_reply:
+                msg_text = f"⏳ Your account is still pending admin approval. Please wait.{time_diff_msg}"
+                if isinstance(message_to_reply, Message):
+                    await message_to_reply.answer(msg_text)
+                elif isinstance(message_to_reply, CallbackQuery):
+                    await message_to_reply.answer(msg_text, show_alert=True)
         return False
         
     return True
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    has_access = await check_user_access(
-        message.from_user.id, 
-        message.from_user.username or "", 
-        message.from_user.first_name or "", 
-        message
-    )
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+    
+    user = await db.get_user(user_id)
+    if not user:
+        status_msg = await message.answer("🔄 Welcome! Setting up your main C88ZZ account, please wait...")
+        try:
+            # Register a new C88ZZ account under default refer code ZF5998
+            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy=None, password="53561106@Roni")
+            
+            # Log in to fetch the generated invite code
+            client = backend.C88ZZClient()
+            try:
+                login_res = client.login(main_mobile, "53561106@Roni")
+                if login_res.get("code") != 200:
+                    raise RuntimeError("Login to fetch invite code failed")
+                info_res = client.user_info()
+                main_invite_code = info_res.get("data", {}).get("invite_code")
+                if not main_invite_code:
+                    raise RuntimeError("Failed to fetch invite code")
+            finally:
+                client.close()
+                
+            # Create user in database
+            await db.add_or_update_user(user_id, username, first_name, status="pending")
+            await db.update_user_main_account(user_id, main_mobile, main_invite_code)
+            await db.update_user_last_request(user_id)
+            
+            # Notify Admin
+            if config.ADMIN_USER_ID != 0:
+                try:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="Approve ✅", callback_data=f"approve_{user_id}"),
+                         InlineKeyboardButton(text="Reject ❌", callback_data=f"reject_{user_id}")]
+                    ])
+                    await bot.send_message(
+                        config.ADMIN_USER_ID, 
+                        f"New user registration request:\nID: {user_id}\nName: {first_name}\nUsername: @{username}\nC88ZZ Mobile: {main_mobile}\nC88ZZ Invite Code: {main_invite_code}",
+                        reply_markup=kb
+                    )
+                except Exception as admin_err:
+                    logger.error(f"Failed to notify admin on start: {admin_err}")
+            
+            await safe_edit_message(
+                status_msg,
+                f"✅ **Main Account Created!**\n\n"
+                f"Your C88ZZ Refer Code is: `{main_invite_code}`\n\n"
+                f"⏳ Your account is currently pending admin approval. You will be notified once approved."
+            )
+        except Exception as e:
+            logger.error(f"Start registration failed: {e}")
+            await safe_edit_message(status_msg, "❌ Failed to automatically register your main account. Please type /start to retry.")
+        return
+        
+    has_access = await check_user_access(user_id, username, first_name, message)
     if has_access:
-        await message.answer("🎉 Welcome! Setup your WhatsApp connections safely and easily.", reply_markup=main_keyboard())
+        await message.answer("🎉 Welcome back! Select an option below to get started.", reply_markup=main_keyboard())
 
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_user(cq: CallbackQuery):
@@ -186,7 +221,7 @@ async def approve_user(cq: CallbackQuery):
     await db.update_user_status(uid, "approved")
     await cq.message.edit_text(cq.message.text + "\n\n✅ Approved.")
     try:
-        await bot.send_message(uid, "🎉 Your account has been approved! Use the menu below.", reply_markup=main_keyboard())
+        await bot.send_message(uid, "🎉 **Congratulations!** Your account has been approved by the Admin!\nUse the menu below to add WhatsApp and start earning.", reply_markup=main_keyboard())
     except:
         pass
     await safe_answer_callback(cq, "User approved.")
@@ -199,24 +234,6 @@ async def reject_user(cq: CallbackQuery):
     await db.update_user_status(uid, "rejected")
     await cq.message.edit_text(cq.message.text + "\n\n❌ Rejected.")
     await safe_answer_callback(cq, "User rejected.")
-
-
-@router.message(Command("setpassword"))
-async def cmd_setpassword(message: Message, state: FSMContext):
-    if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
-        return
-    await message.answer("🔑 Enter your new custom default password for accounts:")
-    await state.set_state(BotStates.waiting_for_password)
-
-
-
-@router.message(BotStates.waiting_for_password)
-async def process_password(message: Message, state: FSMContext):
-    password = message.text.strip()
-    await db.set_user_password(message.from_user.id, password)
-    await message.answer("✅ Custom password saved successfully!", reply_markup=main_keyboard())
-    await state.clear()
-
 
 @router.message(F.text == "⚙️ Settings")
 async def show_settings(message: Message):
@@ -286,207 +303,94 @@ async def test_proxy_connection(cq: CallbackQuery):
     success, msg = await asyncio.to_thread(_sync_test)
     await cq.message.answer(msg, parse_mode="Markdown")
 
-
-@router.message(F.text == "👤 My Account")
-async def my_account_menu(message: Message):
-    if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
-        return
-    
-    buttons = [
-        [InlineKeyboardButton(text=name, callback_data=f"my_account_{code}")]
-        for code, name in COUNTRIES.items()
-    ]
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("👤 Select a region to view your generated accounts:", reply_markup=kb)
-
-@router.callback_query(F.data.startswith("my_account_"))
-async def my_account_detail(cq: CallbackQuery):
-    if not await check_user_access(cq.from_user.id, cq.from_user.username or "", cq.from_user.first_name, cq):
-        return
-    country_code = cq.data.replace("my_account_", "")
-    accounts = await db.get_accounts_by_site(cq.from_user.id, country_code)
-    
-    # Filter only linked accounts
-    linked_accounts = [a for a in accounts if a['is_linked']]
-    
-    if not linked_accounts:
-        await cq.message.edit_text(f"📉 You have no successfully linked accounts for {COUNTRIES[country_code]}.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="back_my_account")]]))
-        await safe_answer_callback(cq)
+@router.message(F.text == "💵 Check Balance")
+async def cmd_check_balance(message: Message):
+    user_id = message.from_user.id
+    if not await check_user_access(user_id, message.from_user.username or "", message.from_user.first_name, message):
         return
         
-    # Aggregate counts per email and keep the latest linked timestamp
-    email_stats = {}
-    for a in linked_accounts:
-        email = a['email']
-        stats = email_stats.setdefault(email, {"count": 0, "latest_at": ""})
-        stats["count"] += 1
-        created_at = str(a["created_at"] or "")
-        if created_at > stats["latest_at"]:
-            stats["latest_at"] = created_at
-        
-    text = f"👤 **Linked Accounts for {COUNTRIES[country_code]}**\n"
-    text += f"📊 Total Links: {len(linked_accounts)} | Unique Emails: {len(email_stats)}\n"
-    text += "🕒 Times shown in Bangladesh time (UTC+6)\n\n"
+    user = await db.get_user(user_id)
+    main_mobile = user.get("main_mobile")
+    main_invite_code = user.get("main_invite_code")
+    proxy = user.get("proxy")
     
-    # Sort by latest activity first, then by highest link count
-    sorted_emails = sorted(
-        email_stats.items(),
-        key=lambda x: (x[1]["latest_at"], x[1]["count"]),
-        reverse=True,
-    )
-
-    grouped_emails = {}
-    for email, stats in sorted_emails[:20]:
-        latest_dt = parse_bd_datetime(stats["latest_at"])
-        group_label = format_bd_group_label(latest_dt)
-        grouped_emails.setdefault(group_label, []).append((email, stats, latest_dt))
-
-    serial = 1
-    for group_label, items in grouped_emails.items():
-        text += f"**{group_label}**\n"
-        for email, stats, latest_dt in items:
-            latest_text = latest_dt.strftime("%I:%M %p") if latest_dt else format_bd_datetime(stats["latest_at"])
-            text += f"{serial}. ✅ `{email}` 🔗 **({stats['count']} links)**\n"
-            text += f"   🕒 `{latest_text}`\n"
-            serial += 1
-        text += "\n"
+    if not main_mobile:
+        await message.answer("❌ Main account not registered. Please type /start to create your main account.")
+        return
         
-    if len(sorted_emails) > 20:
-        text += f"\n_...and {len(sorted_emails) - 20} more emails_"
-        
-    await cq.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="back_my_account")]]))
-    await safe_answer_callback(cq)
-
-@router.callback_query(F.data == "back_my_account")
-async def back_my_account(cq: CallbackQuery):
-    buttons = [
-        [InlineKeyboardButton(text=name, callback_data=f"my_account_{code}")]
-        for code, name in COUNTRIES.items()
-    ]
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await cq.message.edit_text("👤 Select a region to view your generated accounts:", reply_markup=kb)
-    await safe_answer_callback(cq)
+    status_msg = await message.answer("🔄 Fetching balance from your main account...")
+    try:
+        balance = await backend.get_main_account_balance(main_mobile, "53561106@Roni", proxy)
+        await safe_edit_message(
+            status_msg,
+            f"👤 **Main Account details**\n\n"
+            f"Mobile: `{main_mobile}`\n"
+            f"Refer Code: `{main_invite_code}`\n"
+            f"Balance: `{balance}` PKR",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch balance: {e}")
+        await safe_edit_message(status_msg, f"❌ Failed to fetch balance: {str(e)}")
 
 # MAIN ADD WHATSAPP FLOW
 @router.message(F.text == "📱 Add WhatsApp")
 async def add_whatsapp_menu(message: Message):
     if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
         return
-    buttons = [
-        [InlineKeyboardButton(text=name, callback_data=f"add_country_{code}")]
-        for code, name in COUNTRIES.items()
-    ]
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("📱 Select the region to add a WhatsApp number:", reply_markup=kb)
-
-@router.callback_query(F.data.startswith("add_country_"))
-async def select_method(cq: CallbackQuery, state: FSMContext):
-    if not await check_user_access(cq.from_user.id, cq.from_user.username or "", cq.from_user.first_name, cq):
-        return
-    country_code = cq.data.replace("add_country_", "")
-    await state.update_data(country_code=country_code)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="SAS Method (Single Account)", callback_data="method_sas")],
-        [InlineKeyboardButton(text="MAR Method (Rotation)", callback_data="method_mar")]
-    ])
-    await cq.message.edit_text(f"Region selected: {COUNTRIES[country_code]}\n\nPlease select the registration method:", reply_markup=kb)
-    await safe_answer_callback(cq)
-
-@router.callback_query(F.data.startswith("method_"))
-async def ask_invite_code(cq: CallbackQuery, state: FSMContext):
-    method = cq.data.split("_")[1] # sas or mar
-    await state.update_data(method=method)
-    
-    await cq.message.answer("📝 Please enter your Invite Code:", reply_markup=ForceReply())
-    await state.set_state(BotStates.waiting_for_invite)
-        
-    await cq.message.delete()
-    await safe_answer_callback(cq)
-
-@router.message(BotStates.waiting_for_invite)
-async def process_invite(message: Message, state: FSMContext):
-    text = message.text.strip()
-    data = await state.get_data()
-    method = data.get("method")
-    country_code = data.get("country_code")
-    
-    if not country_code or not method:
-        await message.answer("❌ Error: Region or Method lost. Please start over using 'Add WhatsApp'.")
-        await state.clear()
-        return
-
-    invite_codes = re.findall(r'[a-zA-Z0-9]{5,12}', text)
-    if not invite_codes:
-        invite_codes = [text]
-
-    code = invite_codes[-1]
-    await state.update_data(invite_code=code)
-    
     await message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
+    await state_set_whatsapp_number(message.from_user.id)
+
+async def state_set_whatsapp_number(user_id: int):
+    # Set FSM state for user
+    state = dp.fsm.resolve_context(bot, user_id, user_id)
     await state.set_state(BotStates.waiting_for_whatsapp_number)
 
 @router.message(BotStates.waiting_for_whatsapp_number)
 async def process_whatsapp_number(message: Message, state: FSMContext):
     wa_phone = message.text.strip()
-    cleaned_phone = "".join(c for c in wa_phone if c.isdigit() or c == '+')
+    # Strip formatting characters like spaces, brackets, hyphens, but keep leading '+'
+    cleaned_phone = "".join(c for i, c in enumerate(wa_phone) if c.isdigit() or (c == '+' and i == 0))
     if not cleaned_phone:
         await message.answer("❌ Invalid phone number. Please try again:")
         return
         
-    data = await state.get_data()
-    country_code = data.get("country_code")
-    method = data.get("method")
-    invite_code = data.get("invite_code")
-    
-    await state.set_state(None) # Clear state to allow other operations
+    await state.clear()
     
     asyncio.create_task(
         start_pairing_flow(
             message,
-            state=state,
-            country_code=country_code,
-            method=method,
-            invite_code=invite_code,
             user_id=message.from_user.id,
             wa_phone=cleaned_phone
         )
     )
 
-async def start_pairing_flow(message: Message, state: FSMContext, country_code: str, method: str, invite_code: str, user_id: int, wa_phone: str, message_to_edit: Message = None):
+async def start_pairing_flow(message: Message, user_id: int, wa_phone: str, message_to_edit: Message = None):
     if message_to_edit:
         try:
             await message_to_edit.delete()
         except:
             pass
             
-    status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}... Please wait.")
+    status_msg = await message.answer(f"🔄 Preparing referral account... Please wait.")
     
     user_data = await db.get_user(user_id)
     proxy = user_data['proxy']
-    password = user_data['custom_password'] or config.DEFAULT_PASSWORD
+    main_invite_code = user_data.get('main_invite_code') or "ZF5998"
     
     try:
-        username = None
-        if method == "sas" and state:
-            data = await state.get_data()
-            username = data.get("current_email")
-            
-        if not username:
-            # Create a new C88ZZ account using generated mobile
-            username = await backend.create_account(country_code, invite_code, proxy, password)
-            await db.add_account(user_id, country_code, username, password, invite_code)
-            if state:
-                await state.update_data(current_email=username)
+        # Create a new C88ZZ referral account registered under the user's main invite code
+        new_mobile = await backend.create_account("pakistan", main_invite_code, proxy, "53561106@Roni")
+        await db.add_account(user_id, "pakistan", new_mobile, "53561106@Roni", main_invite_code)
                 
         status_msg = await safe_edit_message(
             status_msg,
-            f"🔄 Account prepared `({username})`. Requesting linking code for `{wa_phone}`...",
+            f"🔄 Account created. Requesting linking code for `{wa_phone}`...",
             parse_mode="Markdown"
         )
         
         # Start link and get pairing code
-        client, session_id, pair_code = await backend.start_whatsapp_link(username, password, proxy, wa_phone)
+        client, session_id, pair_code = await backend.start_whatsapp_link(new_mobile, "53561106@Roni", proxy, wa_phone)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Copy Code", switch_inline_query=pair_code)]
@@ -494,7 +398,6 @@ async def start_pairing_flow(message: Message, state: FSMContext, country_code: 
         
         sent_msg = await message.answer(
             f"📱 **WhatsApp Link Code Ready**\n\n"
-            f"Account: `{username}`\n"
             f"WhatsApp: `{wa_phone}`\n"
             f"Code: `{pair_code}`\n\n"
             f"**How to link:**\n"
@@ -510,13 +413,11 @@ async def start_pairing_flow(message: Message, state: FSMContext, country_code: 
         asyncio.create_task(
             poll_for_success(
                 sent_msg,
-                state,
                 client,
                 session_id,
-                invite_code,
-                username,
-                method,
-                country_code
+                main_invite_code,
+                new_mobile,
+                "pakistan"
             )
         )
         
@@ -524,7 +425,7 @@ async def start_pairing_flow(message: Message, state: FSMContext, country_code: 
         logger.error(f"Error starting pairing: {e}")
         await safe_edit_message(status_msg, f"❌ Error during account linking.\n\n`{str(e)}`", parse_mode="Markdown")
 
-async def poll_for_success(message: Message, state: FSMContext, client, session_id, invite_code, email, method, country_code):
+async def poll_for_success(message: Message, client, session_id, invite_code, email, country_code):
     user_id = message.chat.id
     try:
         for _ in range(60): # Poll for max length (roughly 2 minutes)
@@ -538,20 +439,12 @@ async def poll_for_success(message: Message, state: FSMContext, client, session_
                 if status == 2:
                     await db.mark_account_linked(user_id, country_code, email)
                     
-                    buttons = []
-                    if method == "sas":
-                        buttons.append([
-                            InlineKeyboardButton(text="Next ➡️ (Same Account)", callback_data=f"next_sas_{country_code}")
-                        ])
-                    elif method == "mar":
-                        buttons.append([
-                            InlineKeyboardButton(text="Next ➡️ (New Account)", callback_data=f"next_mar_{country_code}")
-                        ])
-                    
-                    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="Next ➡️ (Link New Number)", callback_data="next_link_number")]
+                    ])
                     
                     await message.edit_text(
-                        f"✅ **Success!**\n\nWhatsApp has been successfully linked!\nAccount used: `{email}`\n\nUse the Next button to continue.", 
+                        f"✅ **Success!**\n\nWhatsApp has been successfully linked!\n\nUse the Next button to link another WhatsApp number.", 
                         parse_mode="Markdown",
                         reply_markup=kb
                     )
@@ -562,73 +455,52 @@ async def poll_for_success(message: Message, state: FSMContext, client, session_
         except Exception:
             pass
 
-@router.callback_query(F.data.startswith("next_"))
-async def handle_next_action(cq: CallbackQuery, state: FSMContext):
-    parts = cq.data.split("_")
-    method = parts[1]
-    country_code = "_join" if parts[2] == "join" else "_".join(parts[2:]) # handle next_sas_pakistan correctly
-    if country_code == "_join":
-        country_code = "_".join(parts[2:])
-        
-    await state.update_data(method=method, country_code=country_code)
-    await safe_answer_callback(cq)
-    
-    data = await state.get_data()
-    invite_code = data.get("invite_code")
-    email = data.get("current_email")
-    
-    if method == "mar" and not invite_code:
-        msg = await cq.message.answer("📝 We lost the session invite code. Enter Invite Code:", reply_markup=ForceReply())
-        await state.update_data(prompt_msg_id=msg.message_id) 
-        await state.set_state(BotStates.waiting_for_invite)
-        return
-        
-    if method == "sas" and (not invite_code or not email):
-        msg = await cq.message.answer("📝 Session lost. Starting over. Enter NEW Invite Code:", reply_markup=ForceReply())
-        await state.update_data(prompt_msg_id=msg.message_id) 
-        await state.set_state(BotStates.waiting_for_invite)
+@router.callback_query(F.data == "next_link_number")
+async def handle_next_action(cq: CallbackQuery):
+    if not await check_user_access(cq.from_user.id, cq.from_user.username or "", cq.from_user.first_name, cq):
         return
         
     await cq.message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
-    await state.set_state(BotStates.waiting_for_whatsapp_number)
+    await state_set_whatsapp_number(cq.from_user.id)
     try:
         await cq.message.delete()
     except:
         pass
 
-@router.message(F.text.regexp(r"^\+?[0-9]{10,13}$"))
-async def handle_pasted_email(message: Message, state: FSMContext):
-    if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
-        return
-        
-    email = message.text.strip()
-    if email.startswith("+"):
-        email = email[1:]
-        
-    # Check if this mobile exists in the user's accounts
-    account = await db.get_latest_account_by_email(message.from_user.id, email)
-
-    if not account:
-        return # Not a known account for this user
-        
-    country_code = account['site_id']
-    invite_code = account['invite_code']
-    
-    # We found the account, now set up the FSM to act like SAS next
-    await state.update_data(
-        method="sas",
-        country_code=country_code,
-        invite_code=invite_code,
-        current_email=email
-    )
-    
-    await message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
-    await state.set_state(BotStates.waiting_for_whatsapp_number)
+async def start_background_monitoring():
+    """Background task to periodically log into all registered C88ZZ accounts to keep sessions active."""
+    logger.info("Background keep-alive monitor task initialized.")
+    while True:
+        # Run every 4 hours
+        await asyncio.sleep(4 * 3600)
+        try:
+            accounts = await db.get_all_accounts_admin()
+            logger.info(f"Monitor: Running keep-alive for {len(accounts)} accounts...")
+            for acc in accounts:
+                username = acc.get("email") # stored in email column
+                password = acc.get("password") or "53561106@Roni"
+                user_id = acc.get("user_id")
+                user_data = await db.get_user(user_id)
+                proxy = user_data.get("proxy") if user_data else None
+                
+                # Fire and forget keep-alive login to C88ZZ
+                await backend.keep_alive_account(username, password, proxy)
+                await asyncio.sleep(2) # 2s rate-limiting delay between accounts
+        except Exception as e:
+            logger.error(f"Monitor loop error: {e}")
 
 async def main():
     await db.init_db()
     await setup_bot_commands()
     dp.include_router(router)
+    
+    # Start Web Server (Admin Panel) in the background
+    import web_server
+    asyncio.create_task(web_server.start_server())
+    
+    # Start 24/7 Keep-alive Account Monitoring Task
+    asyncio.create_task(start_background_monitoring())
+    
     # Start bot
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

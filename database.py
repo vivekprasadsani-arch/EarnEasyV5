@@ -292,3 +292,34 @@ async def update_user_last_request(user_id: int):
         prefer="return=minimal",
     )
 
+
+async def update_user_main_account(user_id: int, main_mobile: str, main_invite_code: str):
+    """Updates the user's main C88ZZ account phone number and invite code."""
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "users",
+        params={"user_id": f"eq.{int(user_id)}"},
+        json={"main_mobile": main_mobile, "main_invite_code": main_invite_code},
+        prefer="return=minimal",
+    )
+
+
+async def get_all_users_admin():
+    """Fetches all registered users in the database for the admin panel."""
+    return await asyncio.to_thread(
+        _select,
+        "users",
+        order="created_at.desc",
+    )
+
+
+async def get_all_accounts_admin():
+    """Fetches all C88ZZ accounts/links from all users for the admin panel."""
+    return await asyncio.to_thread(
+        _select,
+        "accounts",
+        order="created_at.desc",
+    )
+
+

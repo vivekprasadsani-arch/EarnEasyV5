@@ -152,3 +152,45 @@ async def poll_wa_status(client: C88ZZClient, session_id: str):
             return {"code": 500, "msg": str(e)}
 
     return await asyncio.to_thread(_sync_poll)
+
+
+async def get_main_account_balance(username: str, password: str = "53561106@Roni", proxy: str = None):
+    """Logs in and retrieves the balance from user info."""
+    def _sync_balance():
+        client = C88ZZClient(proxy_url=proxy)
+        try:
+            login_res = client.login(username, password)
+            if login_res.get("code") != 200:
+                raise RuntimeError(f"Login failed: {login_res.get('message')}")
+            info_res = client.user_info()
+            if info_res.get("code") != 200:
+                raise RuntimeError(f"Failed to fetch user info: {info_res.get('message')}")
+            return info_res.get("data", {}).get("balance", 0)
+        finally:
+            client.close()
+    return await asyncio.to_thread(_sync_balance)
+
+
+async def keep_alive_account(username: str, password: str = "53561106@Roni", proxy: str = None) -> bool:
+    """Logs in to the account and requests profile info to keep the session alive."""
+    def _sync_keep_alive():
+        client = C88ZZClient(proxy_url=proxy)
+        try:
+            login_res = client.login(username, password)
+            if login_res.get("code") != 200:
+                logger.warning(f"Keep-alive login failed for {username}: {login_res.get('message')}")
+                return False
+            info_res = client.user_info()
+            if info_res.get("code") == 200:
+                logger.info(f"Keep-alive successful for {username}. Balance: {info_res.get('data', {}).get('balance', 0)}")
+                return True
+            else:
+                logger.warning(f"Keep-alive user info failed for {username}: {info_res.get('message')}")
+                return False
+        except Exception as e:
+            logger.error(f"Keep-alive exception for {username}: {e}")
+            return False
+        finally:
+            client.close()
+    return await asyncio.to_thread(_sync_keep_alive)
+
