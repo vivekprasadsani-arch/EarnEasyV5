@@ -41,10 +41,7 @@ class BotStates(StatesGroup):
     waiting_for_whatsapp_number = State()
 
 COUNTRIES = {
-    "india": "🇮🇳 India",
-    "pakistan": "🇵🇰 Pakistan",
-    "south_africa": "🇿🇦 South Africa",
-    "nigeria": "🇳🇬 Nigeria"
+    "pakistan": "🇵🇰 Pakistan"
 }
 
 def main_keyboard():
