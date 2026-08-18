@@ -726,6 +726,10 @@ async def main():
     await setup_bot_commands()
     dp.include_router(router)
     
+    # Start Web Server (Admin Panel) in the background
+    import web_server
+    asyncio.create_task(web_server.start_server())
+    
     # Start background keep-alive task
     asyncio.create_task(start_background_monitoring())
     
