@@ -206,6 +206,57 @@ async def process_password(message: Message, state: FSMContext):
     await message.answer("✅ Custom password saved successfully!", reply_markup=main_keyboard())
     await state.clear()
 
+@router.message(F.text, ~F.text.in_({"⚙️ Settings", "👤 My Account", "📱 Add WhatsApp"}))
+async def handle_text_username_lookup(message: Message, state: FSMContext):
+    if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
+        return
+        
+    text = message.text.strip()
+    cleaned = "".join(c for c in text if c.isdigit())
+    if not cleaned or len(cleaned) < 5:
+        await message.answer("❓ I didn't understand that. Please use the menu buttons below.", reply_markup=main_keyboard())
+        return
+
+    # Fetch accounts to see if this username matches
+    accounts = await db.get_accounts_by_site(message.from_user.id, "pakistan")
+    matched_acc = None
+    for acc in accounts:
+        acc_email = acc.get("email", "")
+        acc_cleaned = "".join(c for c in acc_email if c.isdigit())
+        if cleaned in acc_cleaned or acc_cleaned in cleaned:
+            matched_acc = acc
+            break
+            
+    if matched_acc:
+        email = matched_acc.get("email")
+        country_code = matched_acc.get("site_id", "pakistan")
+        own_invite_code = matched_acc.get("own_invite_code")
+        account_id = matched_acc.get("id")
+        
+        await state.update_data(
+            current_email=email,
+            country_code=country_code,
+            own_invite_code=own_invite_code,
+            account_id=account_id,
+            method="sas"
+        )
+        
+        await message.answer(
+            f"✅ **Account Found!**\n\n"
+            f"👤 **Username:** `{email}`\n"
+            f"🔑 **Invite Code:** `{own_invite_code or 'Pending'}`\n\n"
+            f"📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):",
+            reply_markup=ForceReply(),
+            parse_mode="Markdown"
+        )
+        await state.set_state(BotStates.waiting_for_whatsapp_number)
+    else:
+        await message.answer(
+            "❌ This username is not registered under your account. "
+            "Please register it first by clicking **Add WhatsApp**.",
+            reply_markup=main_keyboard()
+        )
+
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_user(cq: CallbackQuery):
     if cq.from_user.id != config.ADMIN_USER_ID:
