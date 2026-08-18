@@ -395,5 +395,55 @@ async def get_all_withdrawals_admin():
     )
 
 
+async def get_latest_account_by_site(user_id: int, site_id: str):
+    """Fetches the latest registered account for a specific user and country."""
+    def _sync_get():
+        return _fetch_first(
+            "accounts",
+            filters={
+                "user_id": f"eq.{int(user_id)}",
+                "site_id": f"eq.{site_id}",
+            },
+            order="id.desc",
+        )
+    return await asyncio.to_thread(_sync_get)
+
+
+async def update_account_own_invite_code(account_id: int, own_invite_code: str):
+    """Updates the registered account's own invite code in the database."""
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "accounts",
+        params={"id": f"eq.{int(account_id)}"},
+        json={"own_invite_code": own_invite_code},
+        prefer="return=minimal",
+    )
+
+
+async def update_account_session_id(account_id: int, session_id: str):
+    """Updates the registered account's WhatsApp session ID in the database."""
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "accounts",
+        params={"id": f"eq.{int(account_id)}"},
+        json={"session_id": session_id},
+        prefer="return=minimal",
+    )
+
+
+async def update_account_linked_status(account_id: int, is_linked: bool):
+    """Updates the linked status of the account in the database."""
+    await asyncio.to_thread(
+        _request,
+        "PATCH",
+        "accounts",
+        params={"id": f"eq.{int(account_id)}"},
+        json={"is_linked": is_linked},
+        prefer="return=minimal",
+    )
+
+
 
 

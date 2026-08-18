@@ -67,12 +67,12 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
         # Try up to 3 times to register an account with a unique number
         for attempt in range(3):
             try:
-                mobile = generate_unique_mobile()
+                mobile = generate_unique_mobile(site_id)
                 client = C88ZZClient(proxy_url=proxy)
                 resp = client.register(mobile, password, invite_code)
                 
                 if resp.get("code") == 200:
-                    logger.info(f"Registered new mobile successfully: {mobile}")
+                    logger.info(f"Registered new mobile successfully for {site_id}: {mobile}")
                     client.close()
                     return mobile
                 
@@ -90,10 +90,12 @@ async def create_account(site_id: str, invite_code: str, proxy: str = None, pass
 
     return await asyncio.to_thread(_sync_create)
 
-async def start_whatsapp_link(username: str, password: str, proxy: str = None, wa_phone: str = ""):
+async def start_whatsapp_link(site_id: str, username: str, password: str, proxy: str = None, wa_phone: str = ""):
     """Logs into the c88zz.com account, requests the WhatsApp link, and fetches the pairing code."""
-    # Robustly clean and normalize the WhatsApp number
-    normalized_phone, area_code = clean_and_normalize_phone(wa_phone)
+    # Robustly clean and normalize the WhatsApp number using site specific country code prefix
+    cc_map = {"india": "91", "pakistan": "92", "south_africa": "27", "nigeria": "234"}
+    default_cc = cc_map.get(site_id.lower(), "92")
+    normalized_phone, area_code = clean_and_normalize_phone(wa_phone, default_country_code=default_cc)
     
     def _sync_start():
         client = C88ZZClient(proxy_url=proxy)

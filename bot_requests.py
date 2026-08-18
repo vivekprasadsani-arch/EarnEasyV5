@@ -176,6 +176,15 @@ class C88ZZClient:
 def generate_pwd(length=8):
     return "".join(random.choices(string.digits, k=length))
 
-def generate_unique_mobile():
-    """Generate a unique Pakistan mobile number starting with 3 followed by 9 random digits."""
-    return f"3{random.randint(100000000, 999999999)}"
+def generate_unique_mobile(site_id="pakistan"):
+    site = (site_id or "pakistan").lower()
+    if site == "pakistan":
+        return f"3{random.randint(100000000, 999999999)}"
+    elif site == "india":
+        return f"{random.choice([7, 8, 9])}{random.randint(100000000, 999999999)}"
+    elif site == "south_africa":
+        return f"{random.choice([6, 7, 8])}{random.randint(10000000, 99999999)}"
+    elif site == "nigeria":
+        return f"{random.choice([7, 8, 9])}{random.randint(100000000, 999999999)}"
+    else:
+        return f"3{random.randint(100000000, 999999999)}"

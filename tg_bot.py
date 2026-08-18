@@ -36,20 +36,22 @@ router = Router()
 
 class BotStates(StatesGroup):
     waiting_for_proxy = State()
+    waiting_for_password = State()
+    waiting_for_invite = State()
     waiting_for_whatsapp_number = State()
-    waiting_for_payment_details = State()
-    waiting_for_withdraw_amount = State()
 
 COUNTRIES = {
-    "pakistan": "🇵🇰 Pakistan"
+    "india": "🇮🇳 India",
+    "pakistan": "🇵🇰 Pakistan",
+    "south_africa": "🇿🇦 South Africa",
+    "nigeria": "🇳🇬 Nigeria"
 }
 
 def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📱 Add WhatsApp")],
-            [KeyboardButton(text="💵 Check Balance"), KeyboardButton(text="📤 Withdraw")],
-            [KeyboardButton(text="⚙️ Settings")]
+            [KeyboardButton(text="👤 My Account"), KeyboardButton(text="⚙️ Settings")]
         ],
         resize_keyboard=True,
         is_persistent=True
@@ -58,6 +60,7 @@ def main_keyboard():
 async def setup_bot_commands():
     await bot.set_my_commands([
         BotCommand(command="start", description="Start the bot"),
+        BotCommand(command="setpassword", description="Set your custom default account password"),
     ])
 
 async def safe_edit_message(message: Message, text: str, parse_mode: str = None):
@@ -163,98 +166,48 @@ async def cmd_start(message: Message):
     
     user = await db.get_user(user_id)
     if not user:
-        status_msg = await message.answer("🔄 Welcome! Setting up your main account, please wait...")
-        
         # Save user to DB as pending immediately so they have a database row
         await db.add_or_update_user(user_id, username, first_name, status="pending")
         await db.update_user_last_request(user_id)
         
-        try:
-            # Fetch admin's proxy to use as the registration proxy
-            admin_data = await db.get_user(config.ADMIN_USER_ID)
-            reg_proxy = admin_data.get("proxy") if admin_data else None
-            
-            # Register a new account under default refer code ZF5998
-            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy=reg_proxy, password="53561106@Roni")
-            
-            # Log in to fetch the generated invite code
-            client = backend.C88ZZClient(proxy_url=reg_proxy)
+        # Notify Admin
+        if config.ADMIN_USER_ID != 0:
             try:
-                login_res = client.login(main_mobile, "53561106@Roni")
-                if login_res.get("code") != 200:
-                    raise RuntimeError("Login to fetch invite code failed")
-                
-                # Fetch user's own invite code
-                try:
-                    invite_info_res = client.user_invite_info()
-                    logger.info(f"inviteInfo response for start: {invite_info_res}")
-                    invite_data = invite_info_res.get("data", {})
-                    main_invite_code = invite_data.get("invite_code") or invite_data.get("code")
-                except Exception as invite_err:
-                    logger.warning(f"Failed to fetch inviteInfo on start: {invite_err}")
-                    main_invite_code = None
-                    
-                # Fallback to info_res
-                if not main_invite_code:
-                    info_res = client.user_info()
-                    main_invite_code = info_res.get("data", {}).get("invite_code")
-                    
-                if not main_invite_code:
-                    raise RuntimeError("Failed to fetch invite code")
-            finally:
-                client.close()
-                
-            # Update user in database with main account details
-            await db.update_user_main_account(user_id, main_mobile, main_invite_code)
-            
-            # Notify Admin
-            if config.ADMIN_USER_ID != 0:
-                try:
-                    kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="Approve ✅", callback_data=f"approve_{user_id}"),
-                         InlineKeyboardButton(text="Reject ❌", callback_data=f"reject_{user_id}")]
-                    ])
-                    await bot.send_message(
-                        config.ADMIN_USER_ID, 
-                        f"New user registration request:\nID: {user_id}\nName: {first_name}\nUsername: @{username}\nMobile: {main_mobile}\nInvite Code: {main_invite_code}",
-                        reply_markup=kb
-                    )
-                except Exception as admin_err:
-                    logger.error(f"Failed to notify admin on start: {admin_err}")
-            
-            await safe_edit_message(
-                status_msg,
-                f"✅ **Welcome!** Your registration request has been submitted.\n\n"
-                f"⏳ Your account is currently pending admin approval. You will be notified once approved."
-            )
-        except Exception as e:
-            logger.error(f"Start registration failed (will retry later): {e}")
-            # Notify Admin without details
-            if config.ADMIN_USER_ID != 0:
-                try:
-                    kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="Approve ✅", callback_data=f"approve_{user_id}"),
-                         InlineKeyboardButton(text="Reject ❌", callback_data=f"reject_{user_id}")]
-                    ])
-                    await bot.send_message(
-                        config.ADMIN_USER_ID, 
-                        f"New user request (Main Account Pending creation due to proxy/network error):\nID: {user_id}\nName: {first_name}\nUsername: @{username}",
-                        reply_markup=kb
-                    )
-                except Exception as admin_err:
-                    logger.error(f"Failed to notify admin on start: {admin_err}")
-                    
-            await safe_edit_message(
-                status_msg,
-                "⏳ **Welcome!** Your request is pending admin approval.\n\n"
-                "*(Note: We couldn't register your main account automatically due to Render IP restrictions. "
-                "Once the Admin approves you, you can set your proxy in settings and we will automatically retry creating your main account)."
-            )
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Approve ✅", callback_data=f"approve_{user_id}"),
+                     InlineKeyboardButton(text="Reject ❌", callback_data=f"reject_{user_id}")]
+                ])
+                await bot.send_message(
+                    config.ADMIN_USER_ID, 
+                    f"New user registration request:\nID: {user_id}\nName: {first_name}\nUsername: @{username}",
+                    reply_markup=kb
+                )
+            except Exception as admin_err:
+                logger.error(f"Failed to notify admin on start: {admin_err}")
+        
+        await message.answer(
+            f"⏳ **Welcome!** Your registration request has been submitted.\n\n"
+            f"Your account is currently pending admin approval. You will be notified once approved."
+        )
         return
         
     has_access = await check_user_access(user_id, username, first_name, message)
     if has_access:
         await message.answer("🎉 Welcome back! Select an option below to get started.", reply_markup=main_keyboard())
+
+@router.message(Command("setpassword"))
+async def cmd_setpassword(message: Message, state: FSMContext):
+    if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
+        return
+    await message.answer("🔑 Enter your new custom default password for accounts:")
+    await state.set_state(BotStates.waiting_for_password)
+
+@router.message(BotStates.waiting_for_password)
+async def process_password(message: Message, state: FSMContext):
+    password = message.text.strip()
+    await db.set_user_password(message.from_user.id, password)
+    await message.answer("✅ Custom password saved successfully!", reply_markup=main_keyboard())
+    await state.clear()
 
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_user(cq: CallbackQuery):
@@ -284,12 +237,9 @@ async def show_settings(message: Message):
         return
     user = await db.get_user(message.from_user.id)
     proxy = user['proxy'] if user['proxy'] else "Not set"
-    pay_method = user.get("payment_method") or "Not set"
-    pay_details = user.get("payment_details") or "Not set"
     
     kb_buttons = [
-        [InlineKeyboardButton(text="🌐 Set Proxy", callback_data="set_proxy"),
-         InlineKeyboardButton(text="💳 Payment Method", callback_data="set_payment_method")]
+        [InlineKeyboardButton(text="🌐 Set Proxy", callback_data="set_proxy")]
     ]
     if user['proxy']:
         kb_buttons.append([InlineKeyboardButton(text="Test Proxy Connection", callback_data="test_proxy")])
@@ -297,9 +247,7 @@ async def show_settings(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     await message.answer(
         f"⚙️ **Settings**\n\n"
-        f"🌐 **Current Proxy:** `{proxy}`\n"
-        f"💳 **Payment Method:** `{pay_method}`\n"
-        f"📱 **Payment Details:** `{pay_details}`",
+        f"🌐 **Current Proxy:** `{proxy}`",
         reply_markup=kb,
         parse_mode="Markdown"
     )
@@ -356,221 +304,261 @@ async def test_proxy_connection(cq: CallbackQuery):
     success, msg = await asyncio.to_thread(_sync_test)
     await cq.message.answer(msg, parse_mode="Markdown")
 
-@router.callback_query(F.data == "set_payment_method")
-async def prompt_payment_method(cq: CallbackQuery):
+# Removed old payment callbacks
+
+@router.message(F.text == "👤 My Account")
+async def my_account_menu(message: Message):
+    if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
+        return
+    
+    buttons = [
+        [InlineKeyboardButton(text=name, callback_data=f"my_account_{code}")]
+        for code, name in COUNTRIES.items()
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("👤 Select a region to view your generated accounts:", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("my_account_"))
+async def my_account_detail(cq: CallbackQuery):
     if not await check_user_access(cq.from_user.id, cq.from_user.username or "", cq.from_user.first_name, cq):
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="bKash", callback_data="pay_bKash"),
-         InlineKeyboardButton(text="Nagad", callback_data="pay_nagad")],
-        [InlineKeyboardButton(text="Binance Pay", callback_data="pay_binance"),
-         InlineKeyboardButton(text="UPI", callback_data="pay_upi")]
-    ])
-    await cq.message.answer("💳 **Select your Payment Method:**", reply_markup=kb, parse_mode="Markdown")
-    await safe_answer_callback(cq)
-
-@router.callback_query(F.data.startswith("pay_"))
-async def select_pay_method(cq: CallbackQuery, state: FSMContext):
-    method = cq.data.split("_")[1] # bKash, nagad, binance, upi
-    method_name = {
-        "bKash": "bKash",
-        "nagad": "Nagad",
-        "binance": "Binance Pay",
-        "upi": "UPI"
-    }.get(method, method)
+    country_code = cq.data.replace("my_account_", "")
+    accounts = await db.get_accounts_by_site(cq.from_user.id, country_code)
     
-    await state.update_data(temp_pay_method=method_name)
-    await cq.message.answer(f"📱 Please enter your **{method_name}** number/address details:", reply_markup=ForceReply(), parse_mode="Markdown")
-    await state.set_state(BotStates.waiting_for_payment_details)
-    await safe_answer_callback(cq)
-
-@router.message(BotStates.waiting_for_payment_details)
-async def process_payment_details(message: Message, state: FSMContext):
-    details = message.text.strip()
-    if not details:
-        await message.answer("❌ Details cannot be empty. Please try again:")
-        return
-        
-    data = await state.get_data()
-    method = data.get("temp_pay_method", "bKash")
-    
-    await db.set_user_payment_details(message.from_user.id, method, details)
-    await message.answer(f"✅ Payment method saved successfully!\n\n**Method:** {method}\n**Details:** `{details}`", reply_markup=main_keyboard())
-    await state.clear()
-
-@router.message(F.text == "💵 Check Balance")
-async def cmd_check_balance(message: Message):
-    user_id = message.from_user.id
-    if not await check_user_access(user_id, message.from_user.username or "", message.from_user.first_name, message):
-        return
-        
-    user = await db.get_user(user_id)
-    main_mobile = user.get("main_mobile")
-    main_invite_code = user.get("main_invite_code")
-    proxy = user.get("proxy")
-    password = user.get("custom_password") or "53561106@Roni"
-    
-    status_msg = await message.answer("🔄 Connecting...")
-    
-    # Self-healing: If the main account was not created during /start, create it now
-    if not main_mobile:
-        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main account first... please wait.")
-        try:
-            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy, password)
-            client = backend.C88ZZClient(proxy_url=proxy)
-            try:
-                login_res = client.login(main_mobile, password)
-                if login_res.get("code") != 200:
-                    raise RuntimeError("Login to fetch invite code failed")
-                
-                # Fetch user's own invite code
-                try:
-                    invite_info_res = client.user_invite_info()
-                    logger.info(f"inviteInfo response for balance check: {invite_info_res}")
-                    invite_data = invite_info_res.get("data", {})
-                    main_invite_code = invite_data.get("invite_code") or invite_data.get("code")
-                except Exception as invite_err:
-                    logger.warning(f"Failed to fetch inviteInfo on balance check: {invite_err}")
-                    main_invite_code = None
-                    
-                # Fallback to info_res
-                if not main_invite_code:
-                    info_res = client.user_info()
-                    main_invite_code = info_res.get("data", {}).get("invite_code")
-                    
-                if not main_invite_code:
-                    raise RuntimeError("Failed to fetch invite code")
-            finally:
-                client.close()
-                
-            await db.update_user_main_account(user_id, main_mobile, main_invite_code)
-            status_msg = await safe_edit_message(status_msg, "🔄 Main account registered successfully. Fetching balance...")
-        except Exception as e:
-            logger.error(f"Balance check auto-registration failed: {e}")
-            await safe_edit_message(status_msg, f"❌ Failed to register main account: {str(e)}\n\n*(Hint: If you need a proxy to register, please check settings).*")
-            return
-            
-    try:
-        balance = await backend.get_main_account_balance(main_mobile, password, proxy)
-        try:
-            points = float(balance)
-            usd_val = (points * 0.05) / 278.0
-        except Exception:
-            usd_val = 0.0
-        await safe_edit_message(
-            status_msg,
-            f"💵 **Your Balance:** `${usd_val:.2f} USD`",
-            parse_mode="Markdown"
+    if not accounts:
+        await cq.message.edit_text(
+            f"📉 You have no accounts registered for {COUNTRIES.get(country_code, country_code)}.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="back_my_account")]])
         )
-    except Exception as e:
-        logger.error(f"Failed to fetch balance: {e}")
-        await safe_edit_message(status_msg, f"❌ Failed to fetch balance: {str(e)}")
+        await safe_answer_callback(cq)
+        return
+        
+    total_accs = len(accounts)
+    online_accs = sum(1 for a in accounts if a.get("is_linked") is True)
+    offline_accs = total_accs - online_accs
+    
+    text = f"👤 **My Accounts for {COUNTRIES.get(country_code, country_code)}**\n\n"
+    text += f"📊 **Total Accounts:** `{total_accs}`\n"
+    text += f"🟢 **Online:** `{online_accs}`\n"
+    text += f"🔴 **Offline:** `{offline_accs}`\n\n"
+    text += "**Account List:**\n"
+    
+    serial = 1
+    for a in accounts:
+        status_emoji = "🟢" if a.get("is_linked") else "🔴"
+        text += f"{serial}. {status_emoji} `{a.get('email')}` (Code: `{a.get('own_invite_code') or 'Pending'}`)\n"
+        serial += 1
+        
+    await cq.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data="back_my_account")]])
+    )
+    await safe_answer_callback(cq)
+
+@router.callback_query(F.data == "back_my_account")
+async def back_my_account(cq: CallbackQuery):
+    buttons = [
+        [InlineKeyboardButton(text=name, callback_data=f"my_account_{code}")]
+        for code, name in COUNTRIES.items()
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await cq.message.edit_text("👤 Select a region to view your generated accounts:", reply_markup=kb)
+    await safe_answer_callback(cq)
 
 # MAIN ADD WHATSAPP FLOW
 @router.message(F.text == "📱 Add WhatsApp")
 async def add_whatsapp_menu(message: Message):
     if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
         return
-    await message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
-    await state_set_whatsapp_number(message.from_user.id)
+    buttons = [
+        [InlineKeyboardButton(text=name, callback_data=f"add_country_{code}")]
+        for code, name in COUNTRIES.items()
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("📱 Select the region to add a WhatsApp number:", reply_markup=kb)
 
-async def state_set_whatsapp_number(user_id: int):
-    # Set FSM state for user
-    state = dp.fsm.resolve_context(bot, user_id, user_id)
+@router.callback_query(F.data.startswith("add_country_"))
+async def select_method(cq: CallbackQuery, state: FSMContext):
+    if not await check_user_access(cq.from_user.id, cq.from_user.username or "", cq.from_user.first_name, cq):
+        return
+    country_code = cq.data.replace("add_country_", "")
+    await state.update_data(country_code=country_code)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="SAS Method (Same Account)", callback_data="method_sas")],
+        [InlineKeyboardButton(text="MAR Method (New Account)", callback_data="method_mar")]
+    ])
+    await cq.message.edit_text(f"Region selected: {COUNTRIES[country_code]}\n\nPlease select the registration method:", reply_markup=kb)
+    await safe_answer_callback(cq)
+
+@router.callback_query(F.data.startswith("method_"))
+async def ask_invite_code(cq: CallbackQuery, state: FSMContext):
+    method = cq.data.split("_")[1] # sas or mar
+    await state.update_data(method=method)
+    
+    await cq.message.answer("📝 Please enter your Refer Code:", reply_markup=ForceReply())
+    await state.set_state(BotStates.waiting_for_invite)
+        
+    await cq.message.delete()
+    await safe_answer_callback(cq)
+
+@router.message(BotStates.waiting_for_invite)
+async def process_invite(message: Message, state: FSMContext):
+    text = message.text.strip()
+    data = await state.get_data()
+    method = data.get("method")
+    country_code = data.get("country_code")
+    
+    if not country_code or not method:
+        await message.answer("❌ Error: Region or Method lost. Please start over using 'Add WhatsApp'.")
+        await state.clear()
+        return
+
+    # Extract all possible codes
+    invite_codes = re.findall(r'\w+', text)
+    if not invite_codes:
+        invite_codes = [text]
+    
+    invite_code = invite_codes[-1]
+    await state.update_data(invite_code=invite_code)
+    
+    # Process registration
+    user_id = message.from_user.id
+    user_data = await db.get_user(user_id)
+    proxy = user_data.get('proxy')
+    password = user_data.get('custom_password') or "53561106@Roni"
+    
+    status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}... Please wait.")
+    
+    email = None
+    own_invite_code = None
+    account_id = None
+    
+    if method == "sas":
+        # SAS: Same Account, New WhatsApp Link (re-uses existing email/mobile for this country if exists)
+        latest_acc = await db.get_latest_account_by_site(user_id, country_code)
+        if latest_acc:
+            email = latest_acc.get("email") # stored in email column
+            own_invite_code = latest_acc.get("own_invite_code")
+            account_id = latest_acc.get("id")
+            # If own_invite_code is not in DB, try to fetch it via login
+            if not own_invite_code:
+                try:
+                    client = backend.C88ZZClient(proxy_url=proxy)
+                    try:
+                        login_res = client.login(email, password)
+                        if login_res.get("code") == 200:
+                            invite_info_res = client.user_invite_info()
+                            invite_data = invite_info_res.get("data", {})
+                            own_invite_code = invite_data.get("invite_code") or invite_data.get("code")
+                            if not own_invite_code:
+                                info_res = client.user_info()
+                                own_invite_code = info_res.get("data", {}).get("invite_code")
+                    finally:
+                        client.close()
+                    if own_invite_code:
+                        await db.update_account_own_invite_code(latest_acc.get("id"), own_invite_code)
+                except Exception as e:
+                    logger.error(f"Failed to fetch SAS own invite: {e}")
+            
+    if not email:
+        # Create a new C88ZZ account
+        try:
+            email = await backend.create_account(country_code, invite_code, proxy, password)
+            # Log in and fetch own invite code
+            try:
+                client = backend.C88ZZClient(proxy_url=proxy)
+                try:
+                    login_res = client.login(email, password)
+                    if login_res.get("code") == 200:
+                        invite_info_res = client.user_invite_info()
+                        invite_data = invite_info_res.get("data", {})
+                        own_invite_code = invite_data.get("invite_code") or invite_data.get("code")
+                        if not own_invite_code:
+                            info_res = client.user_info()
+                            own_invite_code = info_res.get("data", {}).get("invite_code")
+                finally:
+                    client.close()
+            except Exception as e:
+                logger.error(f"Failed to fetch own invite: {e}")
+                
+            account_id = await db.add_account(user_id, country_code, email, password, invite_code)
+            if own_invite_code and account_id:
+                await db.update_account_own_invite_code(account_id, own_invite_code)
+        except Exception as e:
+            logger.error(f"Account registration failed: {e}")
+            await safe_edit_message(status_msg, f"❌ Failed to register account: {str(e)}\n\n*(Hint: If you need a proxy to register, please check settings).*")
+            await state.clear()
+            return
+            
+    # Save current account email in state
+    await state.update_data(current_email=email, own_invite_code=own_invite_code, account_id=account_id)
+    
+    # Prompt for WhatsApp number
+    await safe_edit_message(
+        status_msg,
+        f"✅ **Account Prepared!**\n\n"
+        f"👤 **Username:** `{email}`\n"
+        f"🔑 **Invite Code:** `{own_invite_code or 'Pending'}`\n\n"
+        f"📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):",
+        parse_mode="Markdown"
+    )
     await state.set_state(BotStates.waiting_for_whatsapp_number)
 
 @router.message(BotStates.waiting_for_whatsapp_number)
 async def process_whatsapp_number(message: Message, state: FSMContext):
     wa_phone = message.text.strip()
-    # Strip formatting characters like spaces, brackets, hyphens, but keep leading '+'
     cleaned_phone = "".join(c for i, c in enumerate(wa_phone) if c.isdigit() or (c == '+' and i == 0))
     if not cleaned_phone:
         await message.answer("❌ Invalid phone number. Please try again:")
         return
         
+    data = await state.get_data()
+    email = data.get("current_email")
+    country_code = data.get("country_code")
+    method = data.get("method")
+    own_invite_code = data.get("own_invite_code")
+    account_id = data.get("account_id")
+    
     await state.clear()
     
     asyncio.create_task(
         start_pairing_flow(
             message,
             user_id=message.from_user.id,
-            wa_phone=cleaned_phone
+            email=email,
+            country_code=country_code,
+            method=method,
+            own_invite_code=own_invite_code,
+            wa_phone=cleaned_phone,
+            account_id=account_id
         )
     )
 
-async def start_pairing_flow(message: Message, user_id: int, wa_phone: str, message_to_edit: Message = None):
-    if message_to_edit:
-        try:
-            await message_to_edit.delete()
-        except:
-            pass
-            
-    status_msg = await message.answer(f"🔄 Preparing referral account... Please wait.")
+async def start_pairing_flow(message: Message, user_id: int, email: str, country_code: str, method: str, own_invite_code: str, wa_phone: str, account_id: int):
+    status_msg = await message.answer(f"🔄 Requesting linking code for `{wa_phone}`... Please wait.")
     
     user_data = await db.get_user(user_id)
-    proxy = user_data['proxy']
+    proxy = user_data.get('proxy')
     password = user_data.get("custom_password") or "53561106@Roni"
-    main_invite_code = user_data.get('main_invite_code')
-    main_mobile = user_data.get('main_mobile')
     
-    # Self-healing: If main account was never created, create it now
-    if not main_mobile or not main_invite_code:
-        status_msg = await safe_edit_message(status_msg, "🔄 Registering your main account first... please wait.")
-        try:
-            main_mobile = await backend.create_account("pakistan", "ZF5998", proxy, password)
-            client = backend.C88ZZClient(proxy_url=proxy)
-            try:
-                login_res = client.login(main_mobile, password)
-                if login_res.get("code") != 200:
-                    raise RuntimeError("Login to fetch invite code failed")
-                
-                # Fetch user's own invite code
-                try:
-                    invite_info_res = client.user_invite_info()
-                    logger.info(f"inviteInfo response for pairing flow: {invite_info_res}")
-                    invite_data = invite_info_res.get("data", {})
-                    main_invite_code = invite_data.get("invite_code") or invite_data.get("code")
-                except Exception as invite_err:
-                    logger.warning(f"Failed to fetch inviteInfo on pairing flow: {invite_err}")
-                    main_invite_code = None
-                    
-                # Fallback to info_res
-                if not main_invite_code:
-                    info_res = client.user_info()
-                    main_invite_code = info_res.get("data", {}).get("invite_code")
-                    
-                if not main_invite_code:
-                    raise RuntimeError("Failed to fetch invite code")
-            finally:
-                client.close()
-                
-            await db.update_user_main_account(user_id, main_mobile, main_invite_code)
-            status_msg = await safe_edit_message(status_msg, "🔄 Main account registered successfully. Preparing referral account...")
-        except Exception as e:
-            logger.error(f"Linking flow auto-registration failed: {e}")
-            await safe_edit_message(status_msg, f"❌ Failed to register main account: {str(e)}\n\n*(Hint: If you need a proxy to register, please check settings).*")
-            return
-
     try:
-        # Create a new C88ZZ referral account registered under the user's main invite code
-        new_mobile = await backend.create_account("pakistan", main_invite_code, proxy, password)
-        await db.add_account(user_id, "pakistan", new_mobile, password, main_invite_code)
-                
-        status_msg = await safe_edit_message(
-            status_msg,
-            f"🔄 Account prepared. Requesting linking code for `{wa_phone}`...",
-            parse_mode="Markdown"
-        )
-        
         # Start link and get pairing code
-        client, session_id, pair_code = await backend.start_whatsapp_link(new_mobile, password, proxy, wa_phone)
+        client, session_id, pair_code = await backend.start_whatsapp_link(country_code, email, password, proxy, wa_phone)
         
+        # Save session_id in database
+        if account_id:
+            await db.update_account_session_id(account_id, session_id)
+            
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Copy Code", switch_inline_query=pair_code)]
         ])
         
         sent_msg = await message.answer(
             f"📱 **WhatsApp Link Code Ready**\n\n"
+            f"👤 **Username:** `{email}`\n"
+            f"🔑 **Invite Code:** `{own_invite_code or 'Pending'}`\n"
             f"WhatsApp: `{wa_phone}`\n"
             f"Code: `{pair_code}`\n\n"
             f"**How to link:**\n"
@@ -588,9 +576,10 @@ async def start_pairing_flow(message: Message, user_id: int, wa_phone: str, mess
                 sent_msg,
                 client,
                 session_id,
-                main_invite_code,
-                new_mobile,
-                "pakistan"
+                email,
+                country_code,
+                method,
+                account_id
             )
         )
         
@@ -598,7 +587,7 @@ async def start_pairing_flow(message: Message, user_id: int, wa_phone: str, mess
         logger.error(f"Error starting pairing: {e}")
         await safe_edit_message(status_msg, f"❌ Error during account linking.\n\n`{str(e)}`", parse_mode="Markdown")
 
-async def poll_for_success(message: Message, client, session_id, invite_code, email, country_code):
+async def poll_for_success(message: Message, client, session_id, email, country_code, method, account_id):
     user_id = message.chat.id
     try:
         for _ in range(60): # Poll for max length (roughly 2 minutes)
@@ -612,12 +601,19 @@ async def poll_for_success(message: Message, client, session_id, invite_code, em
                 if status == 2:
                     await db.mark_account_linked(user_id, country_code, email)
                     
-                    kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="Next ➡️ (Link New Number)", callback_data="next_link_number")]
-                    ])
+                    # Return next options based on SAS/MAR method
+                    buttons = []
+                    if method == "sas":
+                        buttons.append([InlineKeyboardButton(text="Next ➡️ (Same Account)", callback_data=f"next_sas_{country_code}")])
+                    else:
+                        buttons.append([InlineKeyboardButton(text="Next ➡️ (New Account)", callback_data=f"next_mar_{country_code}")])
+                    
+                    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
                     
                     await message.edit_text(
-                        f"✅ **Success!**\n\nWhatsApp has been successfully linked!\n\nUse the Next button to link another WhatsApp number.", 
+                        f"✅ **Success!**\n\n"
+                        f"WhatsApp has been successfully linked to `{email}`!\n\n"
+                        f"Use the Next button to continue.", 
                         parse_mode="Markdown",
                         reply_markup=kb
                     )
@@ -628,250 +624,115 @@ async def poll_for_success(message: Message, client, session_id, invite_code, em
         except Exception:
             pass
 
-@router.callback_query(F.data == "next_link_number")
-async def handle_next_action(cq: CallbackQuery):
-    if not await check_user_access(cq.from_user.id, cq.from_user.username or "", cq.from_user.first_name, cq):
-        return
-        
-    await cq.message.answer("📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):", reply_markup=ForceReply())
-    await state_set_whatsapp_number(cq.from_user.id)
-    try:
-        await cq.message.delete()
-    except:
-        pass
-
-@router.message(F.text == "📤 Withdraw")
-async def cmd_withdraw(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    if not await check_user_access(user_id, message.from_user.username or "", message.from_user.first_name, message):
-        return
-        
-    user = await db.get_user(user_id)
-    main_mobile = user.get("main_mobile")
-    proxy = user.get("proxy")
-    password = user.get("custom_password") or "53561106@Roni"
-    pay_method = user.get("payment_method")
-    pay_details = user.get("payment_details")
+@router.callback_query(F.data.startswith("next_"))
+async def handle_next_action(cq: CallbackQuery, state: FSMContext):
+    parts = cq.data.split("_")
+    method = parts[1]
+    country_code = "_".join(parts[2:])
     
-    if not pay_method or not pay_details:
-        await message.answer("❌ Please set your **Payment Method** first in **⚙️ Settings** before requesting a withdrawal.")
-        return
-        
-    if not main_mobile:
-        await message.answer("❌ Main account not registered. Please check your balance first to register.")
-        return
-        
-    status_msg = await message.answer("🔄 Checking account balance...")
-    try:
-        balance_points_str = await backend.get_main_account_balance(main_mobile, password, proxy)
-        try:
-            balance_points = float(balance_points_str)
-        except Exception:
-            balance_points = 0.0
-            
-        usd_current = (balance_points * 0.05) / 278.0
-        
-        # Minimum total balance needed to withdraw $0.40 is $0.50 ($0.40 + $0.10 fee)
-        if usd_current < 0.5:
-            await safe_edit_message(
-                status_msg, 
-                f"❌ **Withdrawal Failed**\n\n"
-                f"Minimum withdrawal is **$0.40 USD**, which requires at least **$0.50 USD** in your account (including a **$0.10 USD** fee).\n\n"
-                f"Your current balance: **${usd_current:.2f} USD**"
-            )
+    await state.update_data(method=method, country_code=country_code)
+    await safe_answer_callback(cq)
+    
+    if method == "mar":
+        # MAR: Same Invite, New Account (creates new email/mobile under the same invite code)
+        data = await state.get_data()
+        invite_code = data.get("invite_code")
+        if not invite_code:
+            msg = await cq.message.answer("📝 We lost the session invite code. Enter Invite Code:", reply_markup=ForceReply())
+            await state.set_state(BotStates.waiting_for_invite)
             return
             
-        await state.update_data(max_usd=usd_current)
-        await status_msg.delete()
+        # Trigger the process invite flow again to register a new account
+        mock_msg = Message(
+            message_id=cq.message.message_id,
+            date=cq.message.date,
+            chat=cq.message.chat,
+            from_user=cq.from_user,
+            text=invite_code
+        )
+        await process_invite(mock_msg, state)
         
-        await message.answer(
-            f"📤 **Enter withdrawal amount in USD** (e.g. 0.50):\n\n"
-            f"💵 **Your current balance:** `${usd_current:.2f} USD`\n"
-            f"💳 **Minimum withdrawal:** `$0.40 USD`\n"
-            f"⚡ **Withdrawal fee:** `$0.10 USD` (added to requested amount)\n\n"
-            f"Please reply with the amount you want to withdraw:",
+    elif method == "sas":
+        # SAS: Same Account, New WhatsApp Link (re-uses existing email/mobile)
+        data = await state.get_data()
+        email = data.get("current_email")
+        own_invite_code = data.get("own_invite_code")
+        account_id = data.get("account_id")
+        
+        if not email:
+            msg = await cq.message.answer("📝 Session lost. Starting over. Enter NEW Invite Code:", reply_markup=ForceReply())
+            await state.set_state(BotStates.waiting_for_invite)
+            return
+            
+        await safe_answer_callback(cq, "🔄 Re-linking same account...", show_alert=False)
+        try:
+            await cq.message.delete()
+        except:
+            pass
+            
+        # Prompt for new WhatsApp number
+        await cq.message.answer(
+            f"✅ **Account Prepared (SAS - Re-using Account)**\n\n"
+            f"👤 **Username:** `{email}`\n"
+            f"🔑 **Invite Code:** `{own_invite_code or 'Pending'}`\n\n"
+            f"📱 Please enter the new WhatsApp number you want to link (e.g. +923XXXXXXXXX):",
             reply_markup=ForceReply(),
             parse_mode="Markdown"
         )
-        await state.set_state(BotStates.waiting_for_withdraw_amount)
-        
-    except Exception as e:
-        logger.error(f"Withdrawal balance check failed: {e}")
-        await safe_edit_message(status_msg, f"❌ Failed to query balance: {str(e)}")
+        await state.set_state(BotStates.waiting_for_whatsapp_number)
 
-@router.message(BotStates.waiting_for_withdraw_amount)
-async def process_withdraw_amount(message: Message, state: FSMContext):
-    input_text = message.text.strip()
-    try:
-        amount_usd = float(input_text)
-    except ValueError:
-        await message.answer("❌ Invalid amount format. Please enter a number (e.g. 0.50):")
-        return
-        
-    if amount_usd < 0.4:
-        await message.answer("❌ Minimum withdrawal amount is **$0.40 USD**. Please enter a valid amount:")
-        return
-        
-    state_data = await state.get_data()
-    max_usd = state_data.get("max_usd", 0.0)
-    
-    total_needed = amount_usd + 0.1
-    if total_needed > max_usd:
-        await message.answer(
-            f"❌ **Insufficient Balance**\n\n"
-            f"To withdraw **${amount_usd:.2f} USD**, you need at least **${total_needed:.2f} USD** (including the **$0.10 USD** fee).\n"
-            f"Your current balance: **${max_usd:.2f} USD**\n\n"
-            f"Please enter a lower amount:"
-        )
-        return
-        
-    # Clear FSM state
-    await state.clear()
-    
-    user_id = message.from_user.id
-    user = await db.get_user(user_id)
-    pay_method = user.get("payment_method")
-    pay_details = user.get("payment_details")
-    
-    # Convert total points to deduct: (amount_usd + 0.1) * 5560
-    points_to_deduct = int(total_needed * 5560.0)
-    
-    status_msg = await message.answer("🔄 Submitting withdrawal request...")
-    try:
-        # Insert request in DB: amount_points = points_to_deduct, amount_usd = amount_usd (what they receive)
-        inserted = await db.add_withdrawal_request(user_id, points_to_deduct, amount_usd, pay_method, pay_details)
-        
-        wd_id = 0
-        if inserted and isinstance(inserted, list) and len(inserted) > 0:
-            wd_id = inserted[0].get("id", 0)
-            
-        # Notify admin bot
-        if config.ADMIN_USER_ID != 0:
-            try:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Approve Withdrawal ✅", callback_data=f"wd_approve_{wd_id}"),
-                     InlineKeyboardButton(text="Reject Withdrawal ❌", callback_data=f"wd_reject_{wd_id}")]
-                ])
-                await bot.send_message(
-                    config.ADMIN_USER_ID,
-                    f"📤 **New Withdrawal Request!**\n\n"
-                    f"User ID: `{user_id}`\n"
-                    f"Name: {message.from_user.first_name}\n"
-                    f"Username: @{message.from_user.username or 'None'}\n"
-                    f"Amount to User: `${amount_usd:.2f} USD` (Net)\n"
-                    f"Total points to deduct: `{points_to_deduct} Points` (${total_needed:.2f} USD Gross)\n"
-                    f"Payment Method: **{pay_method}**\n"
-                    f"Payment Details: `{pay_details}`",
-                    reply_markup=kb
-                )
-            except Exception as admin_err:
-                logger.error(f"Failed to notify admin on withdrawal: {admin_err}")
-                
-        await safe_edit_message(
-            status_msg,
-            f"✅ **Withdrawal Request Submitted!**\n\n"
-            f"Requested Amount: `${amount_usd:.2f} USD`\n"
-            f"Fee: `$0.10 USD`\n"
-            f"Total Deducted: `${total_needed:.2f} USD`\n"
-            f"Method: **{pay_method}**\n"
-            f"Details: `{pay_details}`\n\n"
-            f"⏳ Your request is pending admin approval."
-        )
-    except Exception as e:
-        logger.error(f"Failed to record withdrawal: {e}")
-        await safe_edit_message(status_msg, f"❌ Failed to submit request: {str(e)}")
-
-@router.callback_query(F.data.startswith("wd_approve_"))
-async def approve_withdrawal_cb(cq: CallbackQuery):
-    if cq.from_user.id != config.ADMIN_USER_ID:
-        return
-    wd_id = int(cq.data.split("_")[2])
-    
-    wd = await db.get_withdrawal_by_id(wd_id)
-    if not wd:
-        await safe_answer_callback(cq, "❌ Request not found.", show_alert=True)
-        return
-        
-    if wd.get('status') != 'pending':
-        await safe_answer_callback(cq, f"❌ Request already {wd.get('status')}.", show_alert=True)
-        return
-        
-    await db.update_withdrawal_status(wd_id, "approved")
-    await cq.message.edit_text(cq.message.text + "\n\n✅ Withdrawal Approved.")
-    
-    try:
-        await bot.send_message(
-            wd.get('user_id'), 
-            f"🎉 **Withdrawal Approved!**\n\n"
-            f"Your request for `{wd.get('amount_points')} Points` (${wd.get('amount_usd')} USD) via **{wd.get('payment_method')}** has been approved and paid by the Admin!"
-        )
-    except Exception as notify_err:
-        logger.error(f"Failed to notify user on withdrawal approval: {notify_err}")
-    await safe_answer_callback(cq, "Withdrawal approved.")
-
-@router.callback_query(F.data.startswith("wd_reject_"))
-async def reject_withdrawal_cb(cq: CallbackQuery):
-    if cq.from_user.id != config.ADMIN_USER_ID:
-        return
-    wd_id = int(cq.data.split("_")[2])
-    
-    wd = await db.get_withdrawal_by_id(wd_id)
-    if not wd:
-        await safe_answer_callback(cq, "❌ Request not found.", show_alert=True)
-        return
-        
-    if wd.get('status') != 'pending':
-        await safe_answer_callback(cq, f"❌ Request already {wd.get('status')}.", show_alert=True)
-        return
-        
-    await db.update_withdrawal_status(wd_id, "rejected")
-    await cq.message.edit_text(cq.message.text + "\n\n❌ Withdrawal Rejected.")
-    
-    try:
-        await bot.send_message(
-            wd.get('user_id'), 
-            f"❌ **Withdrawal Rejected**\n\n"
-            f"Your request for `{wd.get('amount_points')} Points` (${wd.get('amount_usd')} USD) via **{wd.get('payment_method')}** was rejected by the Admin."
-        )
-    except Exception as notify_err:
-        logger.error(f"Failed to notify user on withdrawal rejection: {notify_err}")
-    await safe_answer_callback(cq, "Withdrawal rejected.")
+# Removed old withdrawal handlers
 
 async def start_background_monitoring():
-    """Background task to periodically log into all registered C88ZZ accounts to keep sessions active."""
+    """Background task to periodically check online status and keep sessions active."""
     logger.info("Background keep-alive monitor task initialized.")
     while True:
-        # Run every 4 hours
-        await asyncio.sleep(4 * 3600)
         try:
             accounts = await db.get_all_accounts_admin()
-            logger.info(f"Monitor: Running keep-alive for {len(accounts)} accounts...")
+            logger.info(f"Monitor: Running status check & keep-alive for {len(accounts)} accounts...")
             for acc in accounts:
                 username = acc.get("email") # stored in email column
                 password = acc.get("password") or "53561106@Roni"
                 user_id = acc.get("user_id")
                 user_data = await db.get_user(user_id)
                 proxy = user_data.get("proxy") if user_data else None
+                session_id = acc.get("session_id")
+                acc_id = acc.get("id")
                 
-                # Fire and forget keep-alive login to C88ZZ
+                # Check real-time WhatsApp status if session_id is available
+                if session_id and acc_id:
+                    try:
+                        client = backend.C88ZZClient(proxy_url=proxy)
+                        try:
+                            login_res = client.login(username, password)
+                            if login_res.get("code") == 200:
+                                check_res = client.whatsapp_check(session_id)
+                                is_online = check_res.get("data", {}).get("is_online", False)
+                                # Update database status based on real-time check
+                                await db.update_account_linked_status(acc_id, is_online)
+                                logger.info(f"Monitor: Updated account {username} link status: {is_online}")
+                        finally:
+                            client.close()
+                    except Exception as status_err:
+                        logger.error(f"Monitor: Failed to check status for {username}: {status_err}")
+                
+                # Fresh login keep-alive
                 await backend.keep_alive_account(username, password, proxy)
-                await asyncio.sleep(2) # 2s rate-limiting delay between accounts
+                await asyncio.sleep(2) # rate-limiting delay
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")
+        # Run every 4 hours
+        await asyncio.sleep(4 * 3600)
 
 async def main():
     await db.init_db()
     await setup_bot_commands()
     dp.include_router(router)
     
-    # Start Web Server (Admin Panel) in the background
-    import web_server
-    asyncio.create_task(web_server.start_server())
-    
-    # Start 24/7 Keep-alive Account Monitoring Task
+    # Start background keep-alive task
     asyncio.create_task(start_background_monitoring())
     
-    # Start bot
+    # Start bot polling
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
