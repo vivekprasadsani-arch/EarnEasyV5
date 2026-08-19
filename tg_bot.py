@@ -459,7 +459,7 @@ async def process_invite(message: Message, state: FSMContext):
     country_code = data.get("country_code")
     
     if not country_code or not method:
-        await message.answer("❌ Error: Region or Method lost. Please start over using 'Add WhatsApp'.")
+        await bot.send_message(chat_id=message.chat.id, text="❌ Error: Region or Method lost. Please start over using 'Add WhatsApp'.")
         await state.clear()
         return
 
@@ -477,7 +477,7 @@ async def process_invite(message: Message, state: FSMContext):
     proxy = user_data.get('proxy')
     password = user_data.get('custom_password') or "53561106@Roni"
     
-    status_msg = await message.answer(f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}... Please wait.")
+    status_msg = await bot.send_message(chat_id=message.chat.id, text=f"🔄 Preparing account for {COUNTRIES.get(country_code, country_code)}... Please wait.")
     
     email = None
     own_invite_code = None
