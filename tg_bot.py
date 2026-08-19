@@ -745,6 +745,23 @@ async def start_background_monitoring():
             logger.info(f"Monitor: Running status check & keep-alive for {len(accounts)} accounts...")
             for acc in accounts:
                 username = acc.get("email") # stored in email column
+                created_at_str = acc.get("created_at")
+                
+                # Filter accounts: only keep online / check status for accounts created in the last 36 hours
+                is_recent = True
+                if created_at_str:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                        now = datetime.now(timezone.utc)
+                        diff = now - created_dt
+                        if diff > timedelta(hours=36):
+                            is_recent = False
+                    except Exception as parse_err:
+                        logger.error(f"Monitor: Error parsing created_at for {username}: {parse_err}")
+                
+                if not is_recent:
+                    continue
+                
                 password = acc.get("password") or "53561106@Roni"
                 user_id = acc.get("user_id")
                 user_data = await db.get_user(user_id)
