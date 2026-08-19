@@ -568,6 +568,7 @@ async def process_whatsapp_number(message: Message, state: FSMContext):
     method = data.get("method")
     own_invite_code = data.get("own_invite_code")
     account_id = data.get("account_id")
+    invite_code = data.get("invite_code")
     
     await state.clear()
     
@@ -579,12 +580,13 @@ async def process_whatsapp_number(message: Message, state: FSMContext):
             country_code=country_code,
             method=method,
             own_invite_code=own_invite_code,
+            invite_code=invite_code,
             wa_phone=cleaned_phone,
             account_id=account_id
         )
     )
 
-async def start_pairing_flow(message: Message, user_id: int, email: str, country_code: str, method: str, own_invite_code: str, wa_phone: str, account_id: int):
+async def start_pairing_flow(message: Message, user_id: int, email: str, country_code: str, method: str, own_invite_code: str, invite_code: str, wa_phone: str, account_id: int):
     status_msg = await message.answer(f"🔄 Requesting linking code for `{wa_phone}`... Please wait.")
     
     user_data = await db.get_user(user_id)
@@ -627,7 +629,8 @@ async def start_pairing_flow(message: Message, user_id: int, email: str, country
                 email,
                 country_code,
                 method,
-                account_id
+                account_id,
+                invite_code
             )
         )
         
@@ -635,7 +638,7 @@ async def start_pairing_flow(message: Message, user_id: int, email: str, country
         logger.error(f"Error starting pairing: {e}")
         await safe_edit_message(status_msg, f"❌ Error during account linking.\n\n`{str(e)}`", parse_mode="Markdown")
 
-async def poll_for_success(message: Message, client, session_id, email, country_code, method, account_id):
+async def poll_for_success(message: Message, client, session_id, email, country_code, method, account_id, invite_code):
     user_id = message.chat.id
     try:
         for _ in range(60): # Poll for max length (roughly 2 minutes)
@@ -652,9 +655,9 @@ async def poll_for_success(message: Message, client, session_id, email, country_
                     # Return next options based on SAS/MAR method
                     buttons = []
                     if method == "sas":
-                        buttons.append([InlineKeyboardButton(text="Next ➡️ (Same Account)", callback_data=f"next_sas_{country_code}")])
+                        buttons.append([InlineKeyboardButton(text="Next ➡️ (Same Account)", callback_data=f"next_sas_{country_code}_{email}")])
                     else:
-                        buttons.append([InlineKeyboardButton(text="Next ➡️ (New Account)", callback_data=f"next_mar_{country_code}")])
+                        buttons.append([InlineKeyboardButton(text="Next ➡️ (New Account)", callback_data=f"next_mar_{country_code}_{invite_code}")])
                     
                     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
                     
@@ -676,20 +679,14 @@ async def poll_for_success(message: Message, client, session_id, email, country_
 async def handle_next_action(cq: CallbackQuery, state: FSMContext):
     parts = cq.data.split("_")
     method = parts[1]
-    country_code = "_".join(parts[2:])
-    
-    await state.update_data(method=method, country_code=country_code)
-    await safe_answer_callback(cq)
     
     if method == "mar":
-        # MAR: Same Invite, New Account (creates new email/mobile under the same invite code)
-        data = await state.get_data()
-        invite_code = data.get("invite_code")
-        if not invite_code:
-            msg = await cq.message.answer("📝 We lost the session invite code. Enter Invite Code:", reply_markup=ForceReply())
-            await state.set_state(BotStates.waiting_for_invite)
-            return
-            
+        country_code = parts[2]
+        invite_code = parts[3]
+        
+        await state.update_data(method=method, country_code=country_code, invite_code=invite_code)
+        await safe_answer_callback(cq)
+        
         # Trigger the process invite flow again to register a new account
         mock_msg = Message(
             message_id=cq.message.message_id,
@@ -701,17 +698,25 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
         await process_invite(mock_msg, state)
         
     elif method == "sas":
-        # SAS: Same Account, New WhatsApp Link (re-uses existing email/mobile)
-        data = await state.get_data()
-        email = data.get("current_email")
-        own_invite_code = data.get("own_invite_code")
-        account_id = data.get("account_id")
+        country_code = parts[2]
+        email = parts[3]
         
-        if not email:
-            msg = await cq.message.answer("📝 Session lost. Starting over. Enter NEW Invite Code:", reply_markup=ForceReply())
-            await state.set_state(BotStates.waiting_for_invite)
-            return
+        # Retrieve account details from DB to get the own invite code and account id
+        latest_acc = await db.get_latest_account_by_site(cq.from_user.id, country_code)
+        own_invite_code = None
+        account_id = None
+        if latest_acc and latest_acc.get("email") == email:
+            own_invite_code = latest_acc.get("own_invite_code")
+            account_id = latest_acc.get("id")
             
+        await state.update_data(
+            method=method, 
+            country_code=country_code, 
+            current_email=email, 
+            own_invite_code=own_invite_code,
+            account_id=account_id
+        )
+        
         await safe_answer_callback(cq, "🔄 Re-linking same account...", show_alert=False)
         try:
             await cq.message.delete()
