@@ -37,12 +37,7 @@ def clean_and_normalize_phone(wa_phone, default_country_code="92"):
     cleaned = "".join(c for i, c in enumerate(wa_phone) if c.isdigit() or (c == '+' and i == 0))
     digits = cleaned.lstrip("+")
     
-    # Handle domestic formatting with leading 0 (e.g., 0309... -> 92309...)
-    if digits.startswith("0"):
-        digits = digits[1:]
-        return f"{default_country_code}{digits}", default_country_code
-        
-    # Check if starts with a valid country code
+    # Check if starts with a valid country code directly
     matched_code = None
     for code in sorted(COUNTRY_CODES, key=len, reverse=True):
         if digits.startswith(code):
@@ -56,9 +51,25 @@ def clean_and_normalize_phone(wa_phone, default_country_code="92"):
             
     if matched_code:
         return digits, matched_code
-    else:
-        # Domestic format without leading 0 (e.g. 309... -> 92309...)
-        return f"{default_country_code}{digits}", default_country_code
+        
+    # Handle domestic formatting with leading 0 (e.g., 0309...)
+    if digits.startswith("0"):
+        without_zero = digits[1:]
+        # Check if after stripping '0', it starts with a valid country code (e.g., 0225... -> 225...)
+        matched_code_after_zero = None
+        for code in sorted(COUNTRY_CODES, key=len, reverse=True):
+            if without_zero.startswith(code):
+                if code == "30" and default_country_code == "92" and len(without_zero) == 10:
+                    continue
+                matched_code_after_zero = code
+                break
+        if matched_code_after_zero:
+            return without_zero, matched_code_after_zero
+        else:
+            return f"{default_country_code}{without_zero}", default_country_code
+            
+    # Domestic format without leading 0 (e.g. 309... -> 92309...)
+    return f"{default_country_code}{digits}", default_country_code
 
 async def create_account(site_id: str, invite_code: str, proxy: str = None, password: str = "53561106Tojo"):
     """Creates a new registered account on c88zz.com."""
