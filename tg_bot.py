@@ -693,7 +693,8 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
             date=cq.message.date,
             chat=cq.message.chat,
             from_user=cq.from_user,
-            text=invite_code
+            text=invite_code,
+            bot=bot
         )
         await process_invite(mock_msg, state)
         
