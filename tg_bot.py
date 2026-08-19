@@ -9,7 +9,7 @@ from aiogram.types import (Message, CallbackQuery, ReplyKeyboardMarkup, Keyboard
                            InlineKeyboardMarkup, InlineKeyboardButton, ForceReply, BotCommand)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
 
 import config
 import database as db
@@ -206,7 +206,7 @@ async def process_password(message: Message, state: FSMContext):
     await message.answer("✅ Custom password saved successfully!", reply_markup=main_keyboard())
     await state.clear()
 
-@router.message(F.text, ~F.text.in_({"⚙️ Settings", "👤 My Account", "📱 Add WhatsApp"}))
+@router.message(StateFilter(None), F.text, ~F.text.in_({"⚙️ Settings", "👤 My Account", "📱 Add WhatsApp"}))
 async def handle_text_username_lookup(message: Message, state: FSMContext):
     if not await check_user_access(message.from_user.id, message.from_user.username or "", message.from_user.first_name, message):
         return
