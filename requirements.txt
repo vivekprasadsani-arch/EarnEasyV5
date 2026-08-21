@@ -9,3 +9,4 @@ botasaurus
 botasaurus-driver
 botasaurus-requests
 javascript_fixes
+pycryptodome
