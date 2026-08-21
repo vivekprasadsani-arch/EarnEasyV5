@@ -41,7 +41,8 @@ class BotStates(StatesGroup):
     waiting_for_whatsapp_number = State()
 
 COUNTRIES = {
-    "pakistan": "🇵🇰 Pakistan"
+    "pakistan": "🇵🇰 Pakistan",
+    "pakistan_2": "🇵🇰 Pakistan 2"
 }
 
 def main_keyboard():
@@ -493,6 +494,56 @@ async def process_invite(message: Message, state: FSMContext):
             # If own_invite_code is not in DB, try to fetch it via login
             if not own_invite_code:
                 try:
+                    if country_code == "pakistan_2":
+                        from bot_requests import DostWaClient
+                        client = DostWaClient(proxy_url=proxy)
+                        try:
+                            login_res = client.login(email, password)
+                            if login_res.get("code") == 200:
+                                info_res = client.user_info()
+                                own_invite_code = info_res.get("data", {}).get("user", {}).get("inviteCode")
+                        finally:
+                            client.close()
+                    else:
+                        client = backend.C88ZZClient(proxy_url=proxy)
+                        try:
+                            login_res = client.login(email, password)
+                            if login_res.get("code") == 200:
+                                invite_info_res = client.user_invite_info()
+                                invite_data = invite_info_res.get("data", {})
+                                own_invite_code = invite_data.get("invite_code") or invite_data.get("code")
+                                if not own_invite_code:
+                                    info_res = client.user_info()
+                                    own_invite_code = info_res.get("data", {}).get("invite_code")
+                        finally:
+                            client.close()
+                    if own_invite_code:
+                        await db.update_account_own_invite_code(latest_acc.get("id"), own_invite_code)
+                except Exception as e:
+                    logger.error(f"Failed to fetch SAS own invite: {e}")
+            
+    if not email:
+        # Create a new account (branched by site)
+        try:
+            if country_code == "pakistan_2":
+                email = await backend.dostwa_create_account(invite_code, proxy, password)
+                # Log in and fetch own invite code
+                try:
+                    from bot_requests import DostWaClient
+                    client = DostWaClient(proxy_url=proxy)
+                    try:
+                        login_res = client.login(email, password)
+                        if login_res.get("code") == 200:
+                            info_res = client.user_info()
+                            own_invite_code = info_res.get("data", {}).get("user", {}).get("inviteCode")
+                    finally:
+                        client.close()
+                except Exception as e:
+                    logger.error(f"Failed to fetch DostWa own invite: {e}")
+            else:
+                email = await backend.create_account(country_code, invite_code, proxy, password)
+                # Log in and fetch own invite code
+                try:
                     client = backend.C88ZZClient(proxy_url=proxy)
                     try:
                         login_res = client.login(email, password)
@@ -505,31 +556,8 @@ async def process_invite(message: Message, state: FSMContext):
                                 own_invite_code = info_res.get("data", {}).get("invite_code")
                     finally:
                         client.close()
-                    if own_invite_code:
-                        await db.update_account_own_invite_code(latest_acc.get("id"), own_invite_code)
                 except Exception as e:
-                    logger.error(f"Failed to fetch SAS own invite: {e}")
-            
-    if not email:
-        # Create a new C88ZZ account
-        try:
-            email = await backend.create_account(country_code, invite_code, proxy, password)
-            # Log in and fetch own invite code
-            try:
-                client = backend.C88ZZClient(proxy_url=proxy)
-                try:
-                    login_res = client.login(email, password)
-                    if login_res.get("code") == 200:
-                        invite_info_res = client.user_invite_info()
-                        invite_data = invite_info_res.get("data", {})
-                        own_invite_code = invite_data.get("invite_code") or invite_data.get("code")
-                        if not own_invite_code:
-                            info_res = client.user_info()
-                            own_invite_code = info_res.get("data", {}).get("invite_code")
-                finally:
-                    client.close()
-            except Exception as e:
-                logger.error(f"Failed to fetch own invite: {e}")
+                    logger.error(f"Failed to fetch own invite: {e}")
                 
             account_id = await db.add_account(user_id, country_code, email, password, invite_code)
             if own_invite_code and account_id:
@@ -594,8 +622,11 @@ async def start_pairing_flow(message: Message, user_id: int, email: str, country
     password = user_data.get("custom_password") or "53561106@Roni"
     
     try:
-        # Start link and get pairing code
-        client, session_id, pair_code = await backend.start_whatsapp_link(country_code, email, password, proxy, wa_phone)
+        # Start link and get pairing code (branched by site)
+        if country_code == "pakistan_2":
+            client, session_id, pair_code = await backend.dostwa_start_whatsapp_link(email, password, proxy, wa_phone)
+        else:
+            client, session_id, pair_code = await backend.start_whatsapp_link(country_code, email, password, proxy, wa_phone)
         
         # Save session_id in database
         if account_id:
@@ -643,7 +674,10 @@ async def poll_for_success(message: Message, client, session_id, email, country_
     try:
         for _ in range(60): # Poll for max length (roughly 2 minutes)
             await asyncio.sleep(2)
-            res = await backend.poll_wa_status(client, session_id)
+            if country_code == "pakistan_2":
+                res = await backend.dostwa_poll_wa_status(client, session_id)
+            else:
+                res = await backend.poll_wa_status(client, session_id)
             
             if res.get("code") == 200:
                 res_data = res.get("data", {})
@@ -694,8 +728,7 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
             chat=cq.message.chat,
             from_user=cq.from_user,
             text=invite_code,
-            bot=bot
-        )
+        ).as_(bot)
         await process_invite(mock_msg, state)
         
     elif method == "sas":
@@ -769,26 +802,41 @@ async def start_background_monitoring():
                 proxy = user_data.get("proxy") if user_data else None
                 session_id = acc.get("session_id")
                 acc_id = acc.get("id")
-                
                 # Check real-time WhatsApp status if session_id is available
                 if session_id and acc_id:
                     try:
-                        client = backend.C88ZZClient(proxy_url=proxy)
-                        try:
-                            login_res = client.login(username, password)
-                            if login_res.get("code") == 200:
-                                check_res = client.whatsapp_check(session_id)
-                                is_online = check_res.get("data", {}).get("is_online", False)
-                                # Update database status based on real-time check
-                                await db.update_account_linked_status(acc_id, is_online)
-                                logger.info(f"Monitor: Updated account {username} link status: {is_online}")
-                        finally:
-                            client.close()
+                        site_id = acc.get("site_id", "pakistan")
+                        if site_id == "pakistan_2":
+                            client = backend.DostWaClient(proxy_url=proxy)
+                            try:
+                                login_res = client.login(username, password)
+                                if login_res.get("code") == 200:
+                                    check_res = client.get_account_status(session_id)
+                                    status = check_res.get("data", {}).get("status", "")
+                                    is_online = status.lower() in ("bindok", "online", "connected")
+                                    await db.update_account_linked_status(acc_id, is_online)
+                                    logger.info(f"Monitor: Updated DostWa account {username} link status: {is_online}")
+                            finally:
+                                client.close()
+                        else:
+                            client = backend.C88ZZClient(proxy_url=proxy)
+                            try:
+                                login_res = client.login(username, password)
+                                if login_res.get("code") == 200:
+                                    check_res = client.whatsapp_check(session_id)
+                                    is_online = check_res.get("data", {}).get("is_online", False)
+                                    await db.update_account_linked_status(acc_id, is_online)
+                                    logger.info(f"Monitor: Updated account {username} link status: {is_online}")
+                            finally:
+                                client.close()
                     except Exception as status_err:
                         logger.error(f"Monitor: Failed to check status for {username}: {status_err}")
                 
                 # Fresh login keep-alive
-                await backend.keep_alive_account(username, password, proxy)
+                if acc.get("site_id", "pakistan") == "pakistan_2":
+                    await backend.dostwa_keep_alive(username, password, proxy)
+                else:
+                    await backend.keep_alive_account(username, password, proxy)
                 await asyncio.sleep(2) # rate-limiting delay
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")

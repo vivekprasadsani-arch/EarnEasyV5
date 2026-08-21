@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from bot_requests import C88ZZClient, generate_unique_mobile
+from bot_requests import C88ZZClient, DostWaClient, generate_unique_mobile
 
 logger = logging.getLogger(__name__)
 
@@ -26,49 +26,40 @@ COUNTRY_CODES = [
     "973", "974", "975", "976", "977", "992", "993", "994", "995", "996", "998"
 ]
 
-def clean_and_normalize_phone(wa_phone, default_country_code="92"):
+def clean_and_normalize_phone(wa_phone: str, default_country_code: str = "92") -> tuple:
     """
-    Cleans phone number from formatting and normalizes to full international format:
-    - Strips leading '+'
-    - Resolves local formatting (e.g. leading 0)
-    - Detects country code (resolves Greek '30' collision on Pakistani local format)
-    Returns: (normalized_number, country_code)
+    Cleans a phone number input and detects the country code.
+    Returns (normalized_phone_with_cc, country_code).
     """
     cleaned = "".join(c for i, c in enumerate(wa_phone) if c.isdigit() or (c == '+' and i == 0))
+    if not cleaned:
+        return "", default_country_code
+        
+    has_plus = cleaned.startswith("+")
     digits = cleaned.lstrip("+")
     
-    # Check if starts with a valid country code directly
-    matched_code = None
-    for code in sorted(COUNTRY_CODES, key=len, reverse=True):
-        if digits.startswith(code):
-            # Greece code '30' collision check:
-            # If default is Pakistan '92' and we see a 10-digit number starting with '30...',
-            # it's a domestic Pakistan number without the leading '0' (e.g. 3090352946).
-            if code == "30" and default_country_code == "92" and len(digits) == 10:
-                continue
-            matched_code = code
-            break
-            
-    if matched_code:
-        return digits, matched_code
+    if has_plus:
+        for code in sorted(COUNTRY_CODES, key=len, reverse=True):
+            if digits.startswith(code):
+                return digits, code
+        return digits, default_country_code
         
-    # Handle domestic formatting with leading 0 (e.g., 0309...)
+    if digits.startswith(default_country_code) and len(digits) > 10:
+        return digits, default_country_code
+
     if digits.startswith("0"):
         without_zero = digits[1:]
-        # Check if after stripping '0', it starts with a valid country code (e.g., 0225... -> 225...)
-        matched_code_after_zero = None
-        for code in sorted(COUNTRY_CODES, key=len, reverse=True):
-            if without_zero.startswith(code):
-                if code == "30" and default_country_code == "92" and len(without_zero) == 10:
-                    continue
-                matched_code_after_zero = code
-                break
-        if matched_code_after_zero:
-            return without_zero, matched_code_after_zero
-        else:
-            return f"{default_country_code}{without_zero}", default_country_code
+        return f"{default_country_code}{without_zero}", default_country_code
+        
+    if default_country_code == "92" and len(digits) == 10 and digits.startswith("3"):
+        return f"92{digits}", "92"
+        
+    for code in sorted(COUNTRY_CODES, key=len, reverse=True):
+        if digits.startswith(code):
+            if code == "34" and default_country_code == "92" and len(digits) == 10:
+                continue
+            return digits, code
             
-    # Domestic format without leading 0 (e.g. 309... -> 92309...)
     return f"{default_country_code}{digits}", default_country_code
 
 async def create_account(site_id: str, invite_code: str, proxy: str = None, password: str = "53561106Tojo"):
@@ -207,3 +198,136 @@ async def keep_alive_account(username: str, password: str = "53561106@Roni", pro
             client.close()
     return await asyncio.to_thread(_sync_keep_alive)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DostWa (Pakistan 2) Backend Functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def dostwa_create_account(invite_code: str = "K7MBKZ", proxy: str = None,
+                                password: str = "53561106@Roni"):
+    """Creates a new registered account on dostwa.com (Pakistan 2)."""
+    def _sync_create():
+        last_error = ""
+        for attempt in range(3):
+            try:
+                mobile = generate_unique_mobile("pakistan")
+                client = DostWaClient(proxy_url=proxy)
+                resp = client.register(mobile, password, invite_code)
+
+                if resp.get("code") == 200:
+                    logger.info(f"DostWa registered new mobile successfully: {mobile}")
+                    client.close()
+                    return mobile
+
+                msg = str(resp.get("msg") or resp.get("message") or "").lower()
+                if "registered" in msg or "exist" in msg:
+                    continue
+
+                raise RuntimeError(resp.get("msg") or resp.get("message") or "Unknown registration error")
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"DostWa registration attempt {attempt + 1} failed: {e}")
+                time.sleep(2)
+        raise RuntimeError(f"DostWa account creation failed after retries: {last_error}")
+
+    return await asyncio.to_thread(_sync_create)
+
+
+async def dostwa_start_whatsapp_link(username: str, password: str, proxy: str = None,
+                                     wa_phone: str = ""):
+    """Logs into DostWa, requests the WhatsApp pairing code."""
+    cc_map = {"pakistan": "92"}
+    default_cc = "92"
+    normalized_phone, area_code = clean_and_normalize_phone(wa_phone, default_country_code=default_cc)
+
+    # For DostWa, the phone number sent to getPairingCode should NOT have the country code prefix
+    # (based on HAR: phoneNumber = "3477152690", countryCode = "92")
+    phone_without_cc = normalized_phone
+    if phone_without_cc.startswith(area_code):
+        phone_without_cc = phone_without_cc[len(area_code):]
+
+    def _sync_start():
+        client = DostWaClient(proxy_url=proxy)
+        try:
+            # Login
+            login_res = client.login(username, password)
+            if login_res.get("code") != 200:
+                raise RuntimeError(f"DostWa login failed: {login_res.get('msg')}")
+
+            # Request pairing code
+            pair_res = client.get_pairing_code(phone_without_cc, area_code)
+            if pair_res.get("code") != 200:
+                raise RuntimeError(f"DostWa getPairingCode failed: {pair_res.get('msg')}")
+
+            pair_code = pair_res.get("data", {}).get("pairingCode")
+            if not pair_code:
+                raise RuntimeError("No pairing code returned from DostWa")
+
+            # Use phone_without_cc as session_id equivalent for status polling
+            return client, phone_without_cc, pair_code
+        except Exception as e:
+            client.close()
+            raise e
+
+    return await asyncio.to_thread(_sync_start)
+
+
+async def dostwa_poll_wa_status(client: DostWaClient, phone_number: str):
+    """Checks the WhatsApp binding status on DostWa."""
+    def _sync_poll():
+        try:
+            status_res = client.get_account_status(phone_number)
+            status = status_res.get("data", {}).get("status", "")
+
+            # DostWa returns status: "Bindok" when linked, "Binding" while pending
+            if status.lower() in ("bindok", "online", "connected"):
+                return {"code": 200, "data": {"login_status": 2, "wid": "Linked"}}
+            else:
+                return {"code": 200, "data": {"login_status": 1, "wid": ""}}
+        except Exception as e:
+            return {"code": 500, "msg": str(e)}
+
+    return await asyncio.to_thread(_sync_poll)
+
+
+async def dostwa_get_balance(username: str, password: str = "53561106@Roni", proxy: str = None):
+    """Logs in and retrieves balance/points from DostWa user info."""
+    def _sync_balance():
+        client = DostWaClient(proxy_url=proxy)
+        try:
+            login_res = client.login(username, password)
+            if login_res.get("code") != 200:
+                raise RuntimeError(f"DostWa login failed: {login_res.get('msg')}")
+            info_res = client.user_info()
+            if info_res.get("code") != 200:
+                raise RuntimeError(f"Failed to fetch DostWa user info: {info_res.get('msg')}")
+            user_data = info_res.get("data", {}).get("user", {})
+            return user_data.get("points", 0)
+        finally:
+            client.close()
+    return await asyncio.to_thread(_sync_balance)
+
+
+async def dostwa_keep_alive(username: str, password: str = "53561106@Roni", proxy: str = None) -> bool:
+    """Logs in to DostWa and requests profile info to keep the session alive."""
+    def _sync_keep_alive():
+        client = DostWaClient(proxy_url=proxy)
+        try:
+            login_res = client.login(username, password)
+            if login_res.get("code") != 200:
+                logger.warning(f"DostWa keep-alive login failed for {username}: {login_res.get('msg')}")
+                return False
+            info_res = client.user_info()
+            if info_res.get("code") == 200:
+                points = info_res.get("data", {}).get("user", {}).get("points", 0)
+                logger.info(f"DostWa keep-alive successful for {username}. Points: {points}")
+                return True
+            else:
+                logger.warning(f"DostWa keep-alive user info failed for {username}: {info_res.get('msg')}")
+                return False
+        except Exception as e:
+            logger.error(f"DostWa keep-alive exception for {username}: {e}")
+            return False
+        finally:
+            client.close()
+    return await asyncio.to_thread(_sync_keep_alive)
