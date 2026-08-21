@@ -643,6 +643,7 @@ async def process_whatsapp_number(message: Message, state: FSMContext):
     account_id = data.get("account_id")
     invite_code = data.get("invite_code")
     
+    # Clear state before launching background task
     await state.clear()
     
     asyncio.create_task(
@@ -655,12 +656,13 @@ async def process_whatsapp_number(message: Message, state: FSMContext):
             own_invite_code=own_invite_code,
             invite_code=invite_code,
             wa_phone=cleaned_phone,
-            account_id=account_id
+            account_id=account_id,
+            state=state
         )
     )
 
-async def start_pairing_flow(message: Message, user_id: int, email: str, country_code: str, method: str, own_invite_code: str, invite_code: str, wa_phone: str, account_id: int):
-    status_msg = await message.answer(f"🔄 Requesting linking code for `{wa_phone}`... Please wait.")
+async def start_pairing_flow(message: Message, user_id: int, email: str, country_code: str, method: str, own_invite_code: str, invite_code: str, wa_phone: str, account_id: int, state: FSMContext = None):
+    status_msg = await message.answer(f"🔄 Requesting linking code for `{wa_phone}`... Please wait.", parse_mode="Markdown")
     
     user_data = await db.get_user(user_id)
     proxy = user_data.get('proxy')
@@ -712,7 +714,37 @@ async def start_pairing_flow(message: Message, user_id: int, email: str, country
         
     except Exception as e:
         logger.error(f"Error starting pairing: {e}")
-        await safe_edit_message(status_msg, f"❌ Error during account linking.\n\n`{str(e)}`", parse_mode="Markdown")
+        error_str = str(e).lower()
+        
+        # Check if this is a "mobile already exists" type error — number is already linked elsewhere
+        if "mobile already exists" in error_str or "already exists" in error_str or "already registered" in error_str or "exist" in error_str:
+            # Ask user to enter a different number
+            try:
+                await safe_delete_message(status_msg)
+            except:
+                pass
+            
+            # Restore state so user can enter a new number
+            if state is not None:
+                await state.update_data(
+                    current_email=email,
+                    country_code=country_code,
+                    method=method,
+                    own_invite_code=own_invite_code,
+                    account_id=account_id,
+                    invite_code=invite_code
+                )
+                await state.set_state(BotStates.waiting_for_whatsapp_number)
+            
+            await message.answer(
+                f"⚠️ **This WhatsApp number is already in use!**\n\n"
+                f"`{wa_phone}` has already been linked to another account.\n\n"
+                f"📱 Please enter a **different** WhatsApp number to link:",
+                parse_mode="Markdown",
+                reply_markup=ForceReply()
+            )
+        else:
+            await safe_edit_message(status_msg, f"❌ Error during account linking.\n\n`{str(e)}`", parse_mode="Markdown")
 
 async def poll_for_success(message: Message, client, session_id, email, country_code, method, account_id, invite_code):
     user_id = message.chat.id
@@ -732,8 +764,9 @@ async def poll_for_success(message: Message, client, session_id, email, country_
                     await db.mark_account_linked(user_id, country_code, email)
                     
                     # Always register a new account for linking the next number
+                    # Use | as separator to avoid issues with country codes containing underscores (e.g. pakistan_2)
                     buttons = [
-                        [InlineKeyboardButton(text="Next ➡️", callback_data=f"next_mar_{country_code}_{invite_code}")]
+                        [InlineKeyboardButton(text="Next ➡️", callback_data=f"nextaction|mar|{country_code}|{invite_code}")]
                     ]
                     
                     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -752,18 +785,24 @@ async def poll_for_success(message: Message, client, session_id, email, country_
         except Exception:
             pass
 
-@router.callback_query(F.data.startswith("next_"))
+@router.callback_query(F.data.startswith("nextaction|"))
 async def handle_next_action(cq: CallbackQuery, state: FSMContext):
-    parts = cq.data.split("_")
+    # Format: "nextaction|method|country_code|invite_code_or_email"
+    # Use | separator to avoid issues with country codes containing underscores (e.g. pakistan_2)
+    parts = cq.data.split("|")
+    if len(parts) < 4:
+        await safe_answer_callback(cq, "❌ Invalid action.", show_alert=True)
+        return
+
     method = parts[1]
-    
+    country_code = parts[2]
+    extra = parts[3]  # invite_code for mar, email for sas
+
     if method == "mar":
-        country_code = parts[2]
-        invite_code = parts[3]
-        
+        invite_code = extra
         await state.update_data(method=method, country_code=country_code, invite_code=invite_code)
         await safe_answer_callback(cq)
-        
+
         # Trigger the process invite flow again to register a new account
         mock_msg = Message(
             message_id=cq.message.message_id,
@@ -773,17 +812,16 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
             text=invite_code,
         ).as_(bot)
         await process_invite(mock_msg, state)
-        
+
     elif method == "sas":
-        country_code = parts[2]
-        email = parts[3]
-        
+        email = extra
+
         # Retrieve account details from DB to get the invite_code used
         latest_acc = await db.get_latest_account_by_site(cq.from_user.id, country_code)
         invite_code = "K7MBKZ"  # Default fallback
         if latest_acc:
             invite_code = latest_acc.get("invite_code") or "K7MBKZ"
-            
+
         # Switch method to "mar" so it creates a new account instead of reusing the linked one
         await state.update_data(method="mar", country_code=country_code, invite_code=invite_code)
         await safe_answer_callback(cq, "🔄 Registering new account for next link...", show_alert=False)
@@ -791,7 +829,7 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
             await cq.message.delete()
         except:
             pass
-            
+
         # Trigger the process invite flow to register a new account
         mock_msg = Message(
             message_id=cq.message.message_id,
@@ -801,6 +839,41 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
             text=invite_code,
         ).as_(bot)
         await process_invite(mock_msg, state)
+
+# Keep old next_ handler for backward compatibility with old messages
+@router.callback_query(F.data.startswith("next_"))
+async def handle_next_action_legacy(cq: CallbackQuery, state: FSMContext):
+    """Legacy handler for old-format next buttons (next_mar_country_invite)."""
+    # For pakistan_2 the old format is broken due to underscore in country_code
+    # Best we can do is get the country from DB
+    user_id = cq.from_user.id
+    await safe_answer_callback(cq, "🔄 Loading...", show_alert=False)
+
+    # Try to detect method from callback data
+    data = cq.data  # e.g. "next_mar_pakistan_2_K7MBKZ"
+    if data.startswith("next_mar_"):
+        # Try to find the account from DB and use proper country_code
+        for country_code in ["pakistan_2", "pakistan"]:
+            latest_acc = await db.get_latest_account_by_site(user_id, country_code)
+            if latest_acc:
+                invite_code = latest_acc.get("invite_code") or "K7MBKZ"
+                await state.update_data(method="mar", country_code=country_code, invite_code=invite_code)
+                try:
+                    await cq.message.delete()
+                except:
+                    pass
+                mock_msg = Message(
+                    message_id=cq.message.message_id,
+                    date=cq.message.date,
+                    chat=cq.message.chat,
+                    from_user=cq.from_user,
+                    text=invite_code,
+                ).as_(bot)
+                await process_invite(mock_msg, state)
+                return
+    await cq.message.answer("❌ Could not determine account. Please use 📱 Add WhatsApp from the menu.", reply_markup=main_keyboard())
+
+
 
 # Removed old withdrawal handlers
 
