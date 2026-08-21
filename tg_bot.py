@@ -218,21 +218,29 @@ async def handle_text_username_lookup(message: Message, state: FSMContext):
         await message.answer("❓ I didn't understand that. Please use the menu buttons below.", reply_markup=main_keyboard())
         return
 
-    # Fetch accounts to see if this username matches
-    accounts = await db.get_accounts_by_site(message.from_user.id, "pakistan")
-    matched_acc = None
+    # Fetch all accounts to see if this username matches
+    accounts = await db.get_all_accounts(message.from_user.id)
+    matched_accs = []
     for acc in accounts:
         acc_email = acc.get("email", "")
         acc_cleaned = "".join(c for c in acc_email if c.isdigit())
         if cleaned in acc_cleaned or acc_cleaned in cleaned:
-            matched_acc = acc
-            break
+            matched_accs.append(acc)
             
-    if matched_acc:
-        email = matched_acc.get("email")
-        country_code = matched_acc.get("site_id", "pakistan")
-        own_invite_code = matched_acc.get("own_invite_code")
-        account_id = matched_acc.get("id")
+    if not matched_accs:
+        await message.answer(
+            "❌ This username is not registered under your account. "
+            "Please register it first by clicking **Add WhatsApp**.",
+            reply_markup=main_keyboard()
+        )
+        return
+        
+    if len(matched_accs) == 1:
+        acc = matched_accs[0]
+        email = acc.get("email")
+        country_code = acc.get("site_id", "pakistan")
+        own_invite_code = acc.get("own_invite_code")
+        account_id = acc.get("id")
         
         await state.update_data(
             current_email=email,
@@ -243,7 +251,7 @@ async def handle_text_username_lookup(message: Message, state: FSMContext):
         )
         
         await message.answer(
-            f"✅ **Account Found!**\n\n"
+            f"✅ **Account Found!** ({COUNTRIES.get(country_code, country_code)})\n\n"
             f"👤 **Username:** `{email}`\n"
             f"🔑 **Invite Code:** `{own_invite_code or 'Pending'}`\n\n"
             f"📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):",
@@ -252,11 +260,48 @@ async def handle_text_username_lookup(message: Message, state: FSMContext):
         )
         await state.set_state(BotStates.waiting_for_whatsapp_number)
     else:
+        buttons = []
+        for acc in matched_accs:
+            cc = acc.get("site_id", "pakistan")
+            buttons.append([InlineKeyboardButton(text=f"Link to {COUNTRIES.get(cc, cc)}", callback_data=f"fastlink_{acc.get('id')}")])
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer(
-            "❌ This username is not registered under your account. "
-            "Please register it first by clicking **Add WhatsApp**.",
-            reply_markup=main_keyboard()
+            f"✅ **Multiple Accounts Found!**\n\n"
+            f"We found `{len(matched_accs)}` sites registered with this username.\n"
+            f"Please select which site you want to link a WhatsApp number to:",
+            reply_markup=kb,
+            parse_mode="Markdown"
         )
+
+@router.callback_query(F.data.startswith("fastlink_"))
+async def fast_link_account(cq: CallbackQuery, state: FSMContext):
+    acc_id = int(cq.data.replace("fastlink_", ""))
+    acc = await db.get_account_by_id(acc_id)
+    if not acc:
+        await safe_answer_callback(cq, "Account not found.", show_alert=True)
+        return
+        
+    email = acc.get("email")
+    country_code = acc.get("site_id", "pakistan")
+    own_invite_code = acc.get("own_invite_code")
+    
+    await state.update_data(
+        current_email=email,
+        country_code=country_code,
+        own_invite_code=own_invite_code,
+        account_id=acc_id,
+        method="sas"
+    )
+    
+    await cq.message.edit_text(
+        f"✅ **Account Selected!** ({COUNTRIES.get(country_code, country_code)})\n\n"
+        f"👤 **Username:** `{email}`\n"
+        f"🔑 **Invite Code:** `{own_invite_code or 'Pending'}`\n\n"
+        f"📱 Please enter the WhatsApp number you want to link (e.g. +923XXXXXXXXX):",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BotStates.waiting_for_whatsapp_number)
+    await safe_answer_callback(cq)
 
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_user(cq: CallbackQuery):

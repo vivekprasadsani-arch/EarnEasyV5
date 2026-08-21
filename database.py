@@ -250,6 +250,16 @@ async def get_accounts_by_site(user_id: int, site_id: str):
         order="created_at.desc",
     )
 
+async def get_all_accounts(user_id: int):
+    return await asyncio.to_thread(
+        _select,
+        "accounts",
+        filters={
+            "user_id": f"eq.{int(user_id)}",
+        },
+        order="created_at.desc",
+    )
+
 
 async def get_latest_account_by_email(user_id: int, email: str):
     return await asyncio.to_thread(
