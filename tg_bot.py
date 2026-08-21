@@ -778,38 +778,29 @@ async def handle_next_action(cq: CallbackQuery, state: FSMContext):
         country_code = parts[2]
         email = parts[3]
         
-        # Retrieve account details from DB to get the own invite code and account id
+        # Retrieve account details from DB to get the invite_code used
         latest_acc = await db.get_latest_account_by_site(cq.from_user.id, country_code)
-        own_invite_code = None
-        account_id = None
-        if latest_acc and latest_acc.get("email") == email:
-            own_invite_code = latest_acc.get("own_invite_code")
-            account_id = latest_acc.get("id")
+        invite_code = "K7MBKZ"  # Default fallback
+        if latest_acc:
+            invite_code = latest_acc.get("invite_code") or "K7MBKZ"
             
-        await state.update_data(
-            method=method, 
-            country_code=country_code, 
-            current_email=email, 
-            own_invite_code=own_invite_code,
-            account_id=account_id
-        )
-        
-        await safe_answer_callback(cq, "🔄 Re-linking same account...", show_alert=False)
+        # Switch method to "mar" so it creates a new account instead of reusing the linked one
+        await state.update_data(method="mar", country_code=country_code, invite_code=invite_code)
+        await safe_answer_callback(cq, "🔄 Registering new account for next link...", show_alert=False)
         try:
             await cq.message.delete()
         except:
             pass
             
-        # Prompt for new WhatsApp number
-        await cq.message.answer(
-            f"✅ **Account Prepared (SAS - Re-using Account)**\n\n"
-            f"👤 **Username:** `{email}`\n"
-            f"🔑 **Invite Code:** `{own_invite_code or 'Pending'}`\n\n"
-            f"📱 Please enter the new WhatsApp number you want to link (e.g. +923XXXXXXXXX):",
-            reply_markup=ForceReply(),
-            parse_mode="Markdown"
-        )
-        await state.set_state(BotStates.waiting_for_whatsapp_number)
+        # Trigger the process invite flow to register a new account
+        mock_msg = Message(
+            message_id=cq.message.message_id,
+            date=cq.message.date,
+            chat=cq.message.chat,
+            from_user=cq.from_user,
+            text=invite_code,
+        ).as_(bot)
+        await process_invite(mock_msg, state)
 
 # Removed old withdrawal handlers
 
