@@ -731,12 +731,10 @@ async def poll_for_success(message: Message, client, session_id, email, country_
                 if status == 2:
                     await db.mark_account_linked(user_id, country_code, email)
                     
-                    # Return next options based on SAS/MAR method
-                    buttons = []
-                    if method == "sas":
-                        buttons.append([InlineKeyboardButton(text="Next ➡️ (Same Account)", callback_data=f"next_sas_{country_code}_{email}")])
-                    else:
-                        buttons.append([InlineKeyboardButton(text="Next ➡️ (New Account)", callback_data=f"next_mar_{country_code}_{invite_code}")])
+                    # Always register a new account for linking the next number
+                    buttons = [
+                        [InlineKeyboardButton(text="Next ➡️", callback_data=f"next_mar_{country_code}_{invite_code}")]
+                    ]
                     
                     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
                     

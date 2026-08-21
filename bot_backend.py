@@ -226,9 +226,9 @@ async def dostwa_create_account(invite_code: str = "K7MBKZ", proxy: str = None,
                 raise RuntimeError(resp.get("msg") or resp.get("message") or "Unknown registration error")
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"DostWa registration attempt {attempt + 1} failed: {e}")
+                logger.warning(f"Pakistan 2 registration attempt {attempt + 1} failed: {e}")
                 time.sleep(2)
-        raise RuntimeError(f"DostWa account creation failed after retries: {last_error}")
+        raise RuntimeError(f"Pakistan 2 account creation failed after retries: {last_error}")
 
     return await asyncio.to_thread(_sync_create)
 
@@ -252,16 +252,16 @@ async def dostwa_start_whatsapp_link(username: str, password: str, proxy: str = 
             # Login
             login_res = client.login(username, password)
             if login_res.get("code") != 200:
-                raise RuntimeError(f"DostWa login failed: {login_res.get('msg')}")
+                raise RuntimeError(f"Pakistan 2 login failed: {login_res.get('msg')}")
 
             # Request pairing code
             pair_res = client.get_pairing_code(phone_without_cc, area_code)
             if pair_res.get("code") != 200:
-                raise RuntimeError(f"DostWa getPairingCode failed: {pair_res.get('msg')}")
+                raise RuntimeError(f"Pakistan 2 getPairingCode failed: {pair_res.get('msg')}")
 
             pair_code = pair_res.get("data", {}).get("pairingCode")
             if not pair_code:
-                raise RuntimeError("No pairing code returned from DostWa")
+                raise RuntimeError("No pairing code returned from Pakistan 2 server")
 
             # Use phone_without_cc as session_id equivalent for status polling
             return client, phone_without_cc, pair_code
@@ -297,10 +297,10 @@ async def dostwa_get_balance(username: str, password: str = "53561106@Roni", pro
         try:
             login_res = client.login(username, password)
             if login_res.get("code") != 200:
-                raise RuntimeError(f"DostWa login failed: {login_res.get('msg')}")
+                raise RuntimeError(f"Pakistan 2 login failed: {login_res.get('msg')}")
             info_res = client.user_info()
             if info_res.get("code") != 200:
-                raise RuntimeError(f"Failed to fetch DostWa user info: {info_res.get('msg')}")
+                raise RuntimeError(f"Failed to fetch Pakistan 2 user info: {info_res.get('msg')}")
             user_data = info_res.get("data", {}).get("user", {})
             return user_data.get("points", 0)
         finally:
